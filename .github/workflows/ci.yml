@@ -1,0 +1,68 @@
+name: CI cross-platform
+
+on:
+  push:
+    paths:
+      - 'gpxsolar.py'
+      - '_loader.py'
+  pull_request:
+    paths:
+      - 'gpxsolar.py'
+      - '_loader.py'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    # bootstrap=none : le module vérifie que les deps critiques sont importables
+    # (via find_spec) puis continue SANS créer de venv ni relancer. Indispensable
+    # en CI, sinon `import gpxsolar` tenterait de bootstrapper un venv.
+    env:
+      GPXSOLAR_BOOTSTRAP: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntaxe Python
+        run: python -c "import ast; ast.parse(open('gpxsolar.py', encoding='utf-8').read()); print('OK')"
+
+      - name: Syntaxe _loader.py
+        run: python -c "import ast; ast.parse(open('_loader.py', encoding='utf-8').read()); print('OK')"
+
+      - name: Dependances critiques communes
+        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pywebview simplekml shapely Pillow pyproj rasterio
+
+      - name: Backend GUI Qt (Linux)
+        if: runner.os == 'Linux'
+        run: pip install PyQt6 PyQt6-WebEngine qtpy
+
+      - name: Backend GUI Qt + Cocoa (macOS)
+        if: runner.os == 'macOS'
+        run: pip install PyQt6 PyQt6-WebEngine qtpy pyobjc-framework-WebKit pyobjc-framework-Cocoa
+
+      - name: Import complet sans erreur
+        run: |
+          python -c "
+          import sys
+          sys.argv = ['gpxsolar.py']
+          try:
+              import gpxsolar
+          except SystemExit:
+              pass
+          print('Import OK')
+          "
+
+      - name: Aide CLI (smoke test argparse)
+        run: python gpxsolar.py --help

@@ -1,0 +1,84 @@
+# ─── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+dist_onedir/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── gpxsolar : sorties générées (jamais committer) ─────────────────
+*.kml
+*.kmz
+*.csv
+GPX_Ombres/
+analyse_solaire.csv
+
+# ─── Données géospatiales téléchargées / produites ──────────────────
+*.tif
+*.tiff
+*.vrt
+*.hgt
+HGT/
+WorldCover/
+
+# Archives téléchargées (sauf les bundles distribués via Releases)
+*.7z
+*.tar.gz
+*.zip
+!screenshots/**/*.zip
+
+# ─── gpxsolar : binaires et caches (téléchargés à la demande) ───────
+bin/
+cache/
+logs/
+
+# ─── gpxsolar : état utilisateur (perso, jamais public) ─────────────
+gpx_analyzer_config.json
+gpx_analyzer_history.json
+*_manifeste.json
+
+# ─── Tests temporaires ──────────────────────────────────────────────
+*.bak
+*.tmp
+*.swp
+*.log
+
+# ─── Éditeurs / IDE ─────────────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+
+# ─── Outils IA / config locale ──────────────────────────────────────
+.claude/
+.qwen/
+QWEN.MD
+qwen.md
+
+# ─── Utilitaires perso (non distribués) ─────────────────────────────
+_tools/
+push_github.ps1
+lidar2map/
+
+# ─── OS ─────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
