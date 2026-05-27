@@ -5391,6 +5391,69 @@ function btnReset() {
 </html>"""
 
 
+def run_headless(args, tz_finder):
+    """Calcul en ligne de commande (sans GUI), même méthode que lidar2map :
+    déclenché dès qu'un argument est passé. Requiert --gpx, --date, --time.
+    Appelle directement run_gui_process (le moteur de calcul, indépendant de
+    pywebview) puis retourne un code de sortie (0 = succès)."""
+    if not args.gpx:
+        logging.error("Mode ligne de commande : --gpx est requis (avec --date "
+                      "JJ/MM/AAAA et --time HH:MM). Lancez sans argument pour "
+                      "ouvrir l'interface graphique.")
+        return 2
+    if not (args.date and args.time):
+        logging.error("--gpx nécessite aussi --date (JJ/MM/AAAA) et --time (HH:MM).")
+        return 2
+    if not os.path.exists(args.gpx):
+        logging.error(f"Fichier GPX introuvable : {args.gpx}")
+        return 2
+
+    def log_func(msg):
+        logging.info(msg)
+
+    _last = {"pct": -1}
+    def progress_cb(value, text=""):
+        try:
+            pct = int(float(value))
+        except Exception:
+            return
+        if pct != _last["pct"]:
+            _last["pct"] = pct
+            logging.info(f"[{pct:3d}%] {text}".rstrip())
+
+    runner = profile_run_gui_process if args.profile else run_gui_process
+    t0 = datetime.now()
+    try:
+        # Même ordre d'arguments que l'appel depuis la GUI (Api.launch -> run()).
+        runner(
+            args.gpx, args.date, args.time,
+            args.dem_source,
+            str(args.analysis_resolution),
+            float(args.max_shadow_distance),
+            args.shadow_mode,
+            args.direction,
+            bool(args.open),
+            tz_finder, args.output,
+            log_func, progress_cb, args,
+            int(args.batch_size),
+            int(args.passage_interval_min),
+            int(args.solar_step_s),
+            bool(args.visualize_tiles),
+            bool(args.generate_shadow_map),
+            int(args.num_workers),
+            int(args.margin_meters),
+            bool(args.visualize_sun_rays),
+            int(args.sun_ray_interval),
+            args.analysis_type,
+        )
+    except Exception as e:
+        logging.error(f"ERREUR FATALE: {e}")
+        return 1
+    logging.info(f"✓ Calcul termine en {(datetime.now() - t0).total_seconds():.0f}s. "
+                 f"Sorties dans {SHADOW_GPX_DIR} ; CSV : {args.output}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--output', default='analyse_solaire.csv', help='Fichier CSV de sortie')
@@ -5407,7 +5470,45 @@ def main():
     parser.add_argument('--profile', action='store_true', help='Activer le profilage de performance.')
     parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Répertoire temporaire pour les rapports de profilage.')
     parser.add_argument('--debug', action='store_true', help='Ouvre les DevTools pywebview (clic droit -> Inspecter / F12) pour voir la console JS et le bridge.')
-    
+
+    # --- Mode ligne de commande (headless), même méthode que lidar2map ---------
+    # Sans argument -> GUI. Dès qu'un argument est passé, on bascule en mode CLI
+    # (calcul direct sans fenêtre). Le calcul a besoin de --gpx + --date + --time.
+    grp_cli = parser.add_argument_group(
+        'Mode ligne de commande (headless)',
+        "Passer --gpx (avec --date et --time) lance le calcul sans interface "
+        "graphique. Pratique pour scripter / serveur / reproduire un rendu.")
+    grp_cli.add_argument('--gpx', metavar='CHEMIN', default=None,
+                         help='Fichier GPX à analyser. Sa présence déclenche le mode CLI.')
+    grp_cli.add_argument('--date', metavar='JJ/MM/AAAA', default=None,
+                         help='Date de départ (ex: 21/06/2024).')
+    grp_cli.add_argument('--time', metavar='HH:MM', default=None,
+                         help='Heure de départ (ex: 09:00).')
+    grp_cli.add_argument('--shadow-mode', choices=['relief', 'vegetation', 'both'],
+                         default='both', help='Type d\'ombre simulé (défaut: both).')
+    grp_cli.add_argument('--direction', choices=['CW', 'CCW', 'both'], default='both',
+                         help='Sens de parcours simulé (défaut: both).')
+    grp_cli.add_argument('--analysis-type', choices=['ombre_soleil', 'pente'],
+                         default='ombre_soleil', help='Type d\'analyse (défaut: ombre_soleil).')
+    grp_cli.add_argument('--visualize-tiles', action='store_true',
+                         help='Dessiner les tuiles/dalles DEM utilisées dans le KML.')
+    grp_cli.add_argument('--generate-shadow-map', action='store_true',
+                         help='Générer la carte d\'ombre raster (fond de carte) en KMZ.')
+    grp_cli.add_argument('--visualize-sun-rays', action='store_true',
+                         help='Dessiner les rayons solaires simulés dans le KML.')
+    grp_cli.add_argument('--sun-ray-interval', type=int, default=20,
+                         help='Intervalle entre rayons solaires (défaut: 20).')
+    grp_cli.add_argument('--batch-size', type=int, default=256,
+                         help='Taille de lot du calcul (défaut: 256).')
+    grp_cli.add_argument('--solar-step-s', type=int, default=60,
+                         help='Pas temporel du soleil en secondes (défaut: 60).')
+    grp_cli.add_argument('--num-workers', type=int, default=4,
+                         help='Workers parallèles pour la carte d\'ombre (défaut: 4).')
+    grp_cli.add_argument('--margin-meters', type=int, default=500,
+                         help='Marge autour de la trace en mètres (défaut: 500).')
+    grp_cli.add_argument('--open', action='store_true',
+                         help='Ouvrir le résultat à la fin (Windows uniquement).')
+
     help_text = "Ce script analyse l\'ensoleillement d\'une trace GPX.\n\n"
     help_text += "1. Choisissez un fichier GPX.\n"
     help_text += "2. Sélectionnez une date et une heure de départ.\n"
@@ -5452,7 +5553,14 @@ def main():
             return self._get().timezone_at(**kwargs)
 
     tz_finder = _LazyTimezoneFinder()
-    show_form(args, tz_finder, args.output, help_text)
+
+    # Mode (même méthode que lidar2map) : sans argument (ou --debug seul, qui est
+    # un flag GUI/DevTools) -> interface graphique ; sinon -> calcul headless.
+    _is_only_debug = (len(sys.argv) == 2 and sys.argv[1] == "--debug")
+    if len(sys.argv) == 1 or _is_only_debug:
+        show_form(args, tz_finder, args.output, help_text)
+    else:
+        sys.exit(run_headless(args, tz_finder))
 
 
 

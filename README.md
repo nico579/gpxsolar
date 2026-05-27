@@ -148,9 +148,14 @@ extrait + le venv).
 
 ## Utilisation
 
-gpxsolar s'utilise via son **interface graphique** (pywebview). Le plus souvent
-via le **binaire autonome** (aucune installation requise), sinon via le script.
-Lancez sans argument :
+Deux modes, sélectionnés automatiquement selon les arguments (même logique que
+le projet jumeau lidar2map) :
+
+- **Sans argument → interface graphique** (pywebview). Mode courant.
+- **Avec arguments → calcul en ligne de commande** (headless, sans fenêtre).
+  Pratique pour scripter, lancer sur un serveur, ou reproduire un rendu précis.
+
+### Mode interface graphique (sans argument)
 
 | Plateforme | Lancer |
 |---|---|
@@ -167,20 +172,53 @@ Puis dans la fenêtre :
 4. Réglez les options (type d'ombre, végétation, résolution d'analyse).
 5. **Lancez le calcul** → KML/KMZ + CSV.
 
-Options en ligne de commande — **valables pour le binaire comme pour le script**, passées avant le lancement de la GUI :
+### Mode ligne de commande (headless)
+
+Dès qu'on passe un argument, gpxsolar calcule **sans ouvrir de fenêtre** et écrit
+les sorties (KML/KMZ dans `GPX_Ombres/`, plus le CSV). Le minimum requis est
+`--gpx` + `--date` (JJ/MM/AAAA) + `--time` (HH:MM). Tout ce qui suit vaut pour le
+binaire comme pour le script — remplacez simplement `gpxsolar.exe` par
+`./gpxsolar` (Linux) ou `python gpxsolar.py` (dev).
+
+Les trois commandes ci-dessous reproduisent exactement les trois rendus
+Google Earth de la section [Captures d'écran](#captures-décran) :
+
+```powershell
+# 1) Tracé coloré soleil / ombre (rendu de base)
+gpxsolar.exe --gpx rando.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lidar_hd
+
+# 2) + fond de carte (carte d'ombre raster en KMZ)
+gpxsolar.exe --gpx rando.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lidar_hd `
+             --generate-shadow-map
+
+# 3) + rayons solaires simulés
+gpxsolar.exe --gpx rando.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lidar_hd `
+             --generate-shadow-map --visualize-sun-rays --sun-ray-interval 20
+```
+
+> Le backtick `` ` `` est la continuation de ligne PowerShell. Sous Linux/macOS,
+> utilisez `\` ou mettez tout sur une seule ligne.
+
+Principales options (liste complète : `gpxsolar.exe --help`) :
 
 ```
---dem-source {srtm1,copernicus,ign_bdalti,ign_rgealti,ign_lidarhd}
+--gpx CHEMIN                     # fichier GPX (déclenche le mode ligne de commande)
+--date JJ/MM/AAAA --time HH:MM   # date et heure de départ
+--dem-source {srtm1,copernicus,ign_bdalti_25m,ign_rgealti_5m,ign_lidar_hd}
+--shadow-mode {relief,vegetation,both}      # type d'ombre (défaut: both)
+--direction {CW,CCW,both}        # sens de parcours simulé (défaut: both)
+--generate-shadow-map            # carte d'ombre raster (fond de carte) en KMZ
+--visualize-sun-rays             # dessiner les rayons solaires
+--visualize-tiles                # dessiner les dalles/tuiles DEM utilisées
+--sun-ray-interval 20            # espacement des rayons solaires
 --analysis-resolution 5.0        # pas d'échantillonnage du calcul d'ombre (m)
 --max-shadow-distance 1000       # portée max de détection d'ombre (m)
---interpolation {nearest,bilinear,cubic}
 --passage-interval-min 0         # points de passage horodatés (0=aucun)
 --no-vegetation-shadow           # ignorer l'ombre de la végétation
 --no-download-vegetation         # ne pas télécharger WorldCover
 --output analyse_solaire.csv     # nom du CSV de sortie
+--open                           # ouvrir le résultat à la fin (Windows)
 ```
-
-`gpxsolar.exe --help` (ou `./gpxsolar --help`, ou `python gpxsolar.py --help`) liste toutes les options.
 
 ---
 
