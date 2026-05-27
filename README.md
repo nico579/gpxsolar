@@ -49,8 +49,8 @@ Deux façons d'utiliser gpxsolar :
 ### A. Script Python
 
 Au premier lancement, le script crée `~/.gpxsolar/venv` et y installe ses
-dépendances (numpy, pyproj, rasterio, shapely, pysolar, pywebview, simplekml,
-timezonefinder, gpxpy, pandas…). ~80 Mo, **une seule fois**.
+dépendances (numpy, pyproj, rasterio, shapely, pysolar, pywebview + PyQt6/QtWebEngine,
+simplekml, timezonefinder, gpxpy, pandas…). ~300-400 Mo, **une seule fois**.
 
 #### Windows 10+
 ```powershell
@@ -136,7 +136,7 @@ dépannage) : **[BUILD.md](BUILD.md)**.
 | Linux | `chmod +x gpxsolar && ./gpxsolar` dans le dossier extrait |
 | macOS | Double-clic sur `GPXSOLAR.app`. 1er lancement bloqué par Gatekeeper : `xattr -dr com.apple.quarantine GPXSOLAR.app` puis double-clic |
 
-Le premier lancement extrait le bundle (~5-10 s, une fois) dans :
+Le premier lancement extrait le bundle (~20-30 s, une fois — il contient Qt) dans :
 - Windows : `%LOCALAPPDATA%\gpxsolar\`
 - macOS : `~/Library/Application Support/gpxsolar/`
 - Linux : `~/.local/share/gpxsolar/`

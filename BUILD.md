@@ -16,7 +16,7 @@ Un même `gpxsolar.py` est buildé en **deux** binaires PyInstaller :
 │  launcher (onefile)     │ spawn  │  app interne (onedir)                  │
 │  gpxsolar.exe / .app /  │ ─────► │  %LOCALAPPDATA%\gpxsolar\gpxsolar.exe  │
 │  gpxsolar (Linux)       │        │  (extrait depuis le bundle au 1er run) │
-│  ~5-15 Mo, stdlib seul  │        │  ~250-400 Mo, toutes les deps          │
+│  ~9-15 Mo, stdlib seul  │        │  ~500-650 Mo (Qt + deps géo)           │
 └─────────────────────────┘        └──────────────────────────────────────┘
             │
             │ lit, à CÔTÉ de lui (pas embarqué) :
@@ -35,6 +35,23 @@ Un même `gpxsolar.py` est buildé en **deux** binaires PyInstaller :
 
 Le bloc launcher vit en tête de `gpxsolar.py` (gardé par `if getattr(sys,
 "frozen", False)`). En mode développement (`python gpxsolar.py`) il est inerte.
+
+### Backend GUI : Qt sur les 3 OS
+
+La GUI (pywebview) utilise le backend **Qt** (PyQt6 + QtWebEngine) sur **Windows,
+Linux et macOS** — forcé via `PYWEBVIEW_GUI=qt` (posé dans `show_form`, et par le
+runtime hook `_runtime_hook_qt.py` en frozen). Sous Windows c'est un choix
+délibéré : le backend WinForms/WebView2 par défaut passe par pythonnet/.NET, et
+**pythonnet 3.1.0** y régresse — récursion infinie dans la sérialisation d'objets
+.NET (`Rectangle.Empty.Empty…`) → le bridge JS↔Python ne se finalise pas → GUI
+gelée au clic, plus des freezes WinForms intermittents. Qt supprime toute la
+couche .NET et donne le même moteur Chromium partout.
+
+Conséquences : bundle Windows plus gros (QtWebEngine, ~390 Mo zippé vs ~180 en
+WinForms) et 1ʳᵉ extraction plus longue (~20-30 s). Les specs `*_win.spec`
+bundlent PyQt6 (`collect_all`) et excluent winforms/clr/pythonnet ; le venv de
+build doit donc contenir `PyQt6 PyQt6-WebEngine qtpy` (installés par
+`--installer-deps` / `setup_build_*`).
 
 ### Pourquoi le bundle est À CÔTÉ et pas embarqué
 
