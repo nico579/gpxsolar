@@ -180,6 +180,26 @@ Options en ligne de commande (passées avant le lancement de la GUI) :
 
 ---
 
+## Captures d'écran
+
+### Interface graphique
+
+Formulaire pywebview : choix du GPX, date et heure de départ, source d'altitude
+(SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), type d'ombre et options.
+
+![Interface gpxsolar](screenshots/GUI.PNG)
+
+### Rendu dans Google Earth
+
+Le tracé GPX colorisé soleil / ombre le long du parcours, avec le relief, le fond
+de carte et les rayons solaires simulés.
+
+| Tracé coloré soleil/ombre | + fond de carte | + rayons solaires |
+|---|---|---|
+| ![Ombres du tracé GPX](screenshots/ombres_gpx.PNG) | ![Tracé GPX + carte](screenshots/ombres_gpx_carte.PNG) | ![Tracé GPX + carte + rayons](screenshots/ombres_gpx_carte_rayons.PNG) |
+
+---
+
 ## Documentation
 
 - **README utilisateur** : ce fichier
