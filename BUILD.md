@@ -159,6 +159,45 @@ réuploade (DELETE + UPLOAD car GitHub n'accepte pas de PATCH binaire), puis met
 Au prochain lancement, le launcher détecte le SHA différent et ré-extrait le
 bundle automatiquement.
 
+### Compiler (build) vs mettre à jour (patch) — quelle méthode ?
+
+Deux opérations **distinctes**, à ne pas confondre :
+
+| Opération | OS-spécifique ? | Depuis 1 seule machine ? |
+|---|---|---|
+| **Compiler** (PyInstaller : launcher + onedir avec libs natives) | Oui — `.exe` / ELF / `.app` + rasterio/Qt compilés | Non : chaque OS, ou le cloud |
+| **Mettre à jour** `_internal/gpxsolar.py` d'un bundle existant | Non — simple manip de zip | **Oui, pour les 3 OS** |
+
+C'est tout l'intérêt du bundle séparé du launcher : une fois les 3 binaires
+compilés (une fois), **une seule machine met à jour les 3 OS** sans recompiler,
+via `update_app.py --release`.
+
+**Ce que `update_app.py` peut / ne peut PAS patcher :**
+
+- ✅ **Sans rebuild** (vit dans `_internal/gpxsolar.py`, l'app *inner*) : `main`,
+  `show_form`, la logique de calcul, les handlers GUI.
+- ❌ **Rebuild obligatoire** : une **dépendance** (libs natives), un **spec**, le
+  **bloc launcher** (recherche bundle / extraction / **lockfile**) — compilé *dans*
+  l'exe launcher, pas dans le bundle —, la version de Python, un nouvel OS.
+  > Exemple vécu : le durcissement du lockfile (bloc launcher) a exigé un rebuild ;
+  > le muzzle Qt et le clamp fenêtre (dans `show_form`) auraient pu passer par
+  > `update_app.py`.
+
+**Cloud vs local :**
+
+- ☁️ **Cloud (Actions, `release.yml`)** — pour **compiler** : les 3 OS, clean-room
+  reproductible (pas de dérive de machine — c'est ainsi qu'on évite un venv local
+  avec une mauvaise version de dépendance). **Source de vérité des binaires
+  distribués.** Déclenché par un tag `vX.Y.Z`.
+- ⚡ **Local + `update_app.py --release`** — pour **mettre à jour le code** entre
+  deux compilations : sert les 3 OS depuis ta machine, sans recompiler. Voie du
+  quotidien.
+- 🔧 **Build local par-OS** (`*_build.*`) — pour **itérer/déboguer** sur ta propre
+  plateforme. Ne jamais publier un build local comme asset de release.
+
+**Règle** : compiler via le cloud → fix de code ensuite via `update_app.py`
+(3 OS, sans rebuild) → rebuilder seulement si deps / spec / launcher changent.
+
 ---
 
 ## 5. Détails par étape du build
