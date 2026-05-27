@@ -89,9 +89,11 @@ Le onedir est buildé en **2 passes Analysis** :
 | `gpxsolar_mac_launcher.spec` | Spec launcher macOS (`.app`) |
 | `gpxsolar_mac_build.sh` | Build macOS (4 étapes) |
 | `setup_build_mac.sh` | Prépare la machine macOS |
-| `update_app.py` | Maj du bundle (local / archive mac / release 3 OS) |
+| `update_app.py` | Patch du bundle (local / archive mac / release 3 OS) |
 | `push_github.ps1` | Synchronise les sources vers le repo GitHub |
-| `ci_github.yml` | CI GitHub Actions (3 OS) |
+| `ci_github.yml` → `…/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
+| `release_github.yml` → `…/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
+| `update_github.yml` → `…/update.yml` | **Update** : patche le code des 3 bundles d'une release, sans rebuild (manuel) |
 
 Le venv de build est `~/.gpxsolar/venv` sur les 3 OS, créé par le setup via
 `gpxsolar.py --installer-deps` (qui installe toutes les deps puis quitte sans
@@ -183,20 +185,32 @@ via `update_app.py --release`.
   > le muzzle Qt et le clamp fenêtre (dans `show_form`) auraient pu passer par
   > `update_app.py`.
 
-**Cloud vs local :**
+**Trois méthodes de livraison — laquelle choisir :**
 
-- ☁️ **Cloud (Actions, `release.yml`)** — pour **compiler** : les 3 OS, clean-room
-  reproductible (pas de dérive de machine — c'est ainsi qu'on évite un venv local
-  avec une mauvaise version de dépendance). **Source de vérité des binaires
-  distribués.** Déclenché par un tag `vX.Y.Z`.
-- ⚡ **Local + `update_app.py --release`** — pour **mettre à jour le code** entre
-  deux compilations : sert les 3 OS depuis ta machine, sans recompiler. Voie du
-  quotidien.
-- 🔧 **Build local par-OS** (`*_build.*`) — pour **itérer/déboguer** sur ta propre
-  plateforme. Ne jamais publier un build local comme asset de release.
+| Méthode | Compile ? | Upload ~1,5 Go depuis | Pour |
+|---|---|---|---|
+| ☁️ **`release.yml`** (tag `v*`) | oui (3 OS, clean-room) | réseau GitHub | deps / spec / **bloc launcher** / nouvelle version |
+| ☁️ **`update.yml`** (manuel + tag) | non | réseau GitHub | **fix de code seul (recommandé)** |
+| ⚡ **`update_app.py --release`** (local) | non | **ta** connexion | fix de code hors cloud |
+| 🔧 **build local par-OS** (`*_build.*`) | oui (1 OS) | — | itérer / déboguer |
 
-**Règle** : compiler via le cloud → fix de code ensuite via `update_app.py`
-(3 OS, sans rebuild) → rebuilder seulement si deps / spec / launcher changent.
+Détails :
+- ☁️ **`release.yml`** — **source de vérité des binaires distribués** : runner neuf,
+  reproductible (pas de dérive machine — ex. mauvaise version de dépendance). Seul
+  moyen d'obtenir Linux/macOS sans posséder la machine. Déclenché par un tag `vX.Y.Z`.
+- ☁️ **`update.yml`** — fait tourner `update_app.py --release` **sur un runner** :
+  download + patch + ré-upload des ~1,5 Go d'assets se font sur le **réseau GitHub**,
+  pas sur ta liaison montante. **La voie idéale pour livrer un fix de code.**
+- ⚡ **`update_app.py --release` en local** — même résultat, mais re-pousse ~1,5 Go
+  depuis **ta** connexion (DELETE+UPLOAD des assets entiers — GitHub ne patche pas
+  partiellement) ; sur upload lent c'est plus long que le cloud. À réserver au cas
+  hors-ligne / sans accès au repo.
+- 🔧 **Build local** — ne jamais publier un build local comme asset (dérive machine
+  + 1 seul OS) ; sert uniquement à tester sur ta plateforme.
+
+**Règle** : pour livrer, **rester dans le cloud** — `release.yml` si deps/spec/
+launcher changent, sinon `update.yml` (fix de code, sans rebuild ni upload local).
+Le build local n'est que pour itérer/déboguer.
 
 ---
 
