@@ -44,8 +44,10 @@ jobs:
       - name: Dependances critiques communes
         run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pywebview simplekml shapely Pillow pyproj rasterio
 
-      - name: Backend GUI Qt (Linux)
-        if: runner.os == 'Linux'
+      - name: Backend GUI Qt (Linux + Windows)
+        # Windows utilise désormais le backend Qt (plus WinForms) -> PyQt6 fait
+        # partie des deps critiques sur Windows aussi (cf. _gui_deps_plateforme).
+        if: runner.os == 'Linux' || runner.os == 'Windows'
         run: pip install PyQt6 PyQt6-WebEngine qtpy
 
       - name: Backend GUI Qt + Cocoa (macOS)
