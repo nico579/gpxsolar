@@ -171,8 +171,23 @@ if getattr(sys, "frozen", False):
 
             if _need_extract:
                 import time as _time
-                # Lockfile contre les extractions simultanées (double-clic)
-                if _lock.exists():
+                # Lockfile contre les extractions simultanées (double-clic).
+                # Durci contre les locks ORPHELINS : si le lock est plus vieux
+                # que _LOCK_STALE_S (instance tuée/plantée pendant l'extraction),
+                # on le considère périmé et on le retire au lieu d'attendre 60 s
+                # puis d'échouer. L'extraction du bundle prend ~30 s -> 300 s est
+                # une borne haute sûre (pas de faux positif en cas de double-clic).
+                _LOCK_STALE_S = 300
+                _lock_actif = _lock.exists()
+                if _lock_actif:
+                    try:
+                        _lock_actif = (_time.time() - _lock.stat().st_mtime) < _LOCK_STALE_S
+                    except Exception:
+                        _lock_actif = False
+                    if not _lock_actif:
+                        print("  Lockfile périmé détecté — nettoyage et reprise.", flush=True)
+                        _lock.unlink(missing_ok=True)
+                if _lock_actif:
                     print("Installation en cours dans une autre instance — attente...",
                           flush=True)
                     for _ in range(60):
@@ -4563,6 +4578,26 @@ def show_form(args, tz_finder, output_default, help_text):
     # hook du .app pose déjà PYWEBVIEW_GUI=qt. À faire AVANT create_window.
     if platform.system() in ("Windows", "Linux"):
         os.environ.setdefault("PYWEBVIEW_GUI", "qt")
+        # Muselle l'avertissement bénin de fermeture QtWebEngine
+        # ("Release of profile requested but WebEnginePage still not deleted") :
+        # ordre de destruction géré par pywebview, sans conséquence. Un handler
+        # de messages Qt filtre uniquement ce message ; tout le reste passe.
+        try:
+            from PyQt6 import QtCore as _QtCore
+            _QT_NOISE = ("WebEnginePage still not deleted",
+                         "Release of profile requested")
+
+            def _qt_msg_filter(_mode, _ctx, _msg):
+                if any(_n in _msg for _n in _QT_NOISE):
+                    return
+                try:
+                    sys.stderr.write(str(_msg) + "\n")
+                except Exception:
+                    pass
+
+            _QtCore.qInstallMessageHandler(_qt_msg_filter)
+        except Exception:
+            pass
 
     # Taille initiale bornée à l'écran : avec le backend Qt + mise à l'échelle
     # DPI, une hauteur fixe (860) peut dépasser un écran de portable (ex. 1080p
