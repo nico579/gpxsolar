@@ -75,29 +75,25 @@ hiddenimports += [
     "pysolar.tzinfo_check", "pysolar.constants",
 ]
 
-# ── pywebview (backend dépendant de la plateforme) ───────────────────────────
+# ── pywebview : backend Qt forcé (Windows ET Linux) ──────────────────────────
+# Cette spec sert Windows et Linux ; les deux utilisent désormais le backend Qt
+# (PyQt6 + QtWebEngine). Sous Windows ça remplace WinForms/WebView2+pythonnet
+# (régression pythonnet 3.1.0 + freezes WinForms) -> plus de couche .NET, moteur
+# Chromium identique sur les 3 OS.
 datas         += collect_data_files("webview")
 hiddenimports += collect_submodules("webview")
-if IS_LINUX:
-    # Linux : PyQt6 + WebEngine + qtpy (auto-installés par le bootstrap)
-    for _lib in ("PyQt6", "qtpy"):
-        try:
-            d, b, h = collect_all(_lib)
-            datas += d; binaries += b; hiddenimports += h
-        except Exception as _e:
-            print(f"  [WARN] collect_all({_lib}) a échoué : {_e}")
-    hiddenimports += [
-        "webview.platforms.qt",
-        "PyQt6.QtWebEngineWidgets",
-        "PyQt6.QtWebEngineCore",
-        "PyQt6.QtWebChannel",
-    ]
-else:
-    # Windows : WinForms / Edge WebView2 (Win10+)
-    hiddenimports += [
-        "webview.platforms.winforms",
-        "clr_loader", "clr_loader.netfx", "pythonnet",
-    ]
+for _lib in ("PyQt6", "qtpy"):
+    try:
+        d, b, h = collect_all(_lib)
+        datas += d; binaries += b; hiddenimports += h
+    except Exception as _e:
+        print(f"  [WARN] collect_all({_lib}) a échoué : {_e}")
+hiddenimports += [
+    "webview.platforms.qt",
+    "PyQt6.QtWebEngineWidgets",
+    "PyQt6.QtWebEngineCore",
+    "PyQt6.QtWebChannel",
+]
 
 # ── simplekml : templates XML embarqués ───────────────────────────────────────
 datas += collect_data_files("simplekml")
@@ -153,21 +149,18 @@ _excludes = [
     "test", "unittest", "pydoc_data",
     "IPython", "jupyter",
 ]
-if IS_LINUX:
-    # Linux : on garde PyQt6 (backend pywebview), on exclut les autres
-    _excludes += ["webview.platforms.winforms", "webview.platforms.cocoa",
-                  "clr_loader", "pythonnet",
-                  "PyQt5", "PySide2", "PySide6"]
-else:
-    # Windows : backend WinForms → on exclut Qt
-    _excludes += ["PyQt5", "PyQt6", "PySide2", "PySide6"]
+# Backend Qt sur Windows+Linux : on garde PyQt6, on exclut WinForms/Cocoa et
+# toute la couche .NET (plus utilisée), ainsi que les autres bindings Qt.
+_excludes += ["webview.platforms.winforms", "webview.platforms.cocoa",
+              "clr", "clr_loader", "clr_loader.netfx", "pythonnet",
+              "PyQt5", "PySide2", "PySide6"]
 
-# ── Runtime hook (Linux) : forcer PYWEBVIEW_GUI=qt + chemins Qt ──────────────
-_runtime_hooks = []
-if IS_LINUX:
-    _hook = SRC / "build" / "_runtime_hook_linux.py"
-    _hook.parent.mkdir(parents=True, exist_ok=True)
-    _hook.write_text("""\
+# ── Runtime hook : forcer PYWEBVIEW_GUI=qt + chemins QtWebEngine ─────────────
+# S'applique Windows ET Linux (backend Qt sur les deux). Les gardes os.path
+# rendent les chemins inexistants inoffensifs sur l'OS qui ne les a pas.
+_hook = SRC / "build" / "_runtime_hook_qt.py"
+_hook.parent.mkdir(parents=True, exist_ok=True)
+_hook.write_text("""\
 import os, sys
 _base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.executable)))
 os.environ.setdefault('PYWEBVIEW_GUI', 'qt')
@@ -175,7 +168,8 @@ _plugins = os.path.join(_base, 'PyQt6', 'Qt6', 'plugins')
 if os.path.isdir(_plugins):
     os.environ.setdefault('QT_PLUGIN_PATH', _plugins)
 for _cand in (
-    os.path.join(_base, 'PyQt6', 'Qt6', 'libexec', 'QtWebEngineProcess'),
+    os.path.join(_base, 'PyQt6', 'Qt6', 'bin', 'QtWebEngineProcess.exe'),   # Windows
+    os.path.join(_base, 'PyQt6', 'Qt6', 'libexec', 'QtWebEngineProcess'),   # Linux
     os.path.join(_base, 'PyQt6', 'QtWebEngineProcess'),
 ):
     if os.path.isfile(_cand):
@@ -195,7 +189,7 @@ try:
 except Exception:
     pass
 """)
-    _runtime_hooks = [str(_hook)]
+_runtime_hooks = [str(_hook)]
 
 # ── 2 passes PyInstaller ─────────────────────────────────────────────────────
 # gpxsolar.py est livré en data (fichier texte) → PyInstaller ne l'analyse pas

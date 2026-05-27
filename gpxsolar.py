@@ -325,12 +325,15 @@ _DEPS_OPTIONNELLES = [
 def _gui_deps_plateforme():
     """Backend GUI de pywebview selon l'OS — (module, paquet pip).
 
-      Windows  WebView2 natif (Win10+), aucune dépendance pip supplémentaire.
-      macOS    Cocoa/WebKit via pyobjc (natif, léger) + PyQt6 en filet pour
-               les Mac headless. pyobjc est livré avec le Python python.org
-               mais PAS avec Homebrew/conda/pyenv.
-      Linux    Pas de backend natif → Qt (PyQt6 + WebEngine + qtpy) est le
-               seul backend installable via pip de façon fiable.
+    On force le backend **Qt** (PyQt6 + QtWebEngine) sur les TROIS OS — cf.
+    _forcer_backend_qt(). C'est le même moteur Chromium partout -> pile uniforme.
+
+      Windows  Qt au lieu de WinForms/WebView2+pythonnet : ce dernier souffre
+               d'une régression pythonnet 3.1.0 (sérialisation .NET en récursion
+               infinie -> bridge cassé -> GUI gelée) et de freezes récurrents.
+               Qt supprime toute la couche .NET.
+      Linux    Pas de backend natif → Qt est le seul installable via pip.
+      macOS    Cocoa/WebKit via pyobjc (natif) + PyQt6 en filet (Mac headless).
     """
     _s = platform.system()
     if _s == "Darwin":
@@ -341,7 +344,7 @@ def _gui_deps_plateforme():
             ("PyQt6.QtWebEngineWidgets",  "PyQt6-WebEngine"),
             ("qtpy",                      "qtpy"),
         ]
-    if _s == "Linux":
+    if _s in ("Linux", "Windows"):
         return [
             ("PyQt6",                     "PyQt6"),
             ("PyQt6.QtWebEngineWidgets",  "PyQt6-WebEngine"),
@@ -4356,6 +4359,19 @@ def show_form(args, tz_finder, output_default, help_text):
             self._last_error = ""
             self._progress = {"value": 0, "text": "En attente..."}
             self.window = None
+            self._dbg("Api.__init__")
+
+        def _dbg(self, msg):
+            # Diagnostic frozen : écrit dans gpxsolar_gui_debug.log (cwd) si
+            # GPXSOLAR_GUIDEBUG est défini. Sert à vérifier que le bridge
+            # JS->Python répond en mode exe (poll_log est appelé en boucle).
+            if not os.environ.get("GPXSOLAR_GUIDEBUG"):
+                return
+            try:
+                with open("gpxsolar_gui_debug.log", "a", encoding="utf-8") as _f:
+                    _f.write(f"{datetime.now().isoformat()} frozen={getattr(sys,'frozen',False)} {msg}\n")
+            except Exception:
+                pass
 
         def _get_window(self):
             if self.window is None and webview.windows:
@@ -4370,19 +4386,24 @@ def show_form(args, tz_finder, output_default, help_text):
             return {"ok": ok}
 
         def pick_gpx(self):
+            self._dbg("pick_gpx:enter")
             w = self._get_window()
             if not w:
+                self._dbg("pick_gpx:no-window")
                 return ""
             try:
                 r = w.create_file_dialog(
                     webview.OPEN_DIALOG,
                     file_types=("GPX files (*.gpx)", "All files (*.*)"))
+                self._dbg(f"pick_gpx:result={r}")
                 return r[0] if r else ""
             except Exception as e:
+                self._dbg(f"pick_gpx:EXC {type(e).__name__}: {e}")
                 logging.warning(f"pick_gpx erreur: {e}")
                 return ""
 
         def poll_log(self):
+            self._dbg("poll_log")
             items = []
             try:
                 while True:
@@ -4536,16 +4557,56 @@ def show_form(args, tz_finder, output_default, help_text):
         f"window.INIT_DATA = {init_json};"
     )
 
+    # Backend Qt forcé sous Windows et Linux : PyQt6 + QtWebEngine au lieu de
+    # WinForms/WebView2+pythonnet sous Windows (régression pythonnet 3.1.0 +
+    # freezes WinForms). Même moteur Chromium sur les 3 OS. macOS : le runtime
+    # hook du .app pose déjà PYWEBVIEW_GUI=qt. À faire AVANT create_window.
+    if platform.system() in ("Windows", "Linux"):
+        os.environ.setdefault("PYWEBVIEW_GUI", "qt")
+
+    # Taille initiale bornée à l'écran : avec le backend Qt + mise à l'échelle
+    # DPI, une hauteur fixe (860) peut dépasser un écran de portable (ex. 1080p
+    # à 150 % = 720 px logiques) -> fenêtre hors écran. On clampe sur la zone de
+    # travail (hors barre des tâches) sous Windows. Fenêtre redimensionnable.
+    _w, _h = 1180, 860
+    try:
+        if platform.system() == "Windows":
+            import ctypes
+            from ctypes import wintypes
+            _r = wintypes.RECT()
+            ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(_r), 0)  # SPI_GETWORKAREA
+            _wa_w, _wa_h = _r.right - _r.left, _r.bottom - _r.top
+            if _wa_h > 0:
+                _h = max(560, min(_h, _wa_h - 48))
+                _w = max(900, min(_w, _wa_w - 48))
+    except Exception:
+        pass
+    api._dbg(f"window size -> {_w}x{_h}")
+
     win = webview.create_window(
         f"Simu Rando Solaire {APP_VERSION}",
         html=HTML,
         js_api=api,
-        width=1180, height=860,
-        min_size=(960, 600),
+        width=_w, height=_h,
+        min_size=(900, 560),
         zoomable=True,
     )
     api.window = win
-    webview.start(debug=False)
+    # Diagnostic : capture les logs internes de pywebview (renderer choisi,
+    # erreurs clr/bridge) dans gpxsolar_gui_debug.log si GPXSOLAR_GUIDEBUG défini.
+    if os.environ.get("GPXSOLAR_GUIDEBUG"):
+        try:
+            _h = logging.FileHandler("gpxsolar_gui_debug.log", encoding="utf-8")
+            _h.setFormatter(logging.Formatter("%(asctime)s PYWEBVIEW %(levelname)s %(message)s"))
+            for _ln in ("pywebview", "webview"):
+                _wl = logging.getLogger(_ln)
+                _wl.setLevel(logging.DEBUG)
+                _wl.addHandler(_h)
+        except Exception:
+            pass
+    # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12) pour
+    # diagnostiquer le bridge JS<->Python en mode frozen. Activé par --debug.
+    webview.start(debug=bool(getattr(args, "debug", False)))
 
 
 def _build_gpxsolar_html():
@@ -5340,6 +5401,7 @@ def main():
                        help='Distance maximale de détection d\'ombre (en mètres, défaut: 1000)')
     parser.add_argument('--profile', action='store_true', help='Activer le profilage de performance.')
     parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Répertoire temporaire pour les rapports de profilage.')
+    parser.add_argument('--debug', action='store_true', help='Ouvre les DevTools pywebview (clic droit -> Inspecter / F12) pour voir la console JS et le bridge.')
     
     help_text = "Ce script analyse l\'ensoleillement d\'une trace GPX.\n\n"
     help_text += "1. Choisissez un fichier GPX.\n"
