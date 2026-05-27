@@ -148,12 +148,16 @@ extrait + le venv).
 
 ## Utilisation
 
-gpxsolar s'utilise via son **interface graphique** (pywebview). Lancez-le sans
-argument :
+gpxsolar s'utilise via son **interface graphique** (pywebview). Le plus souvent
+via le **binaire autonome** (aucune installation requise), sinon via le script.
+Lancez sans argument :
 
-```bash
-python gpxsolar.py        # (ou gpxsolar.exe / GPXSOLAR.app)
-```
+| Plateforme | Lancer |
+|---|---|
+| **Windows** | double-clic sur **`gpxsolar.exe`** (ou en terminal pour voir le log) |
+| **Linux** | **`./gpxsolar`** dans le dossier extrait |
+| **macOS** | double-clic sur **`GPXSOLAR.app`** |
+| Script (dev) | `python gpxsolar.py` |
 
 Puis dans la fenêtre :
 1. Choisissez un fichier **GPX**.
@@ -163,7 +167,7 @@ Puis dans la fenêtre :
 4. Réglez les options (type d'ombre, végétation, résolution d'analyse).
 5. **Lancez le calcul** → KML/KMZ + CSV.
 
-Options en ligne de commande (passées avant le lancement de la GUI) :
+Options en ligne de commande — **valables pour le binaire comme pour le script**, passées avant le lancement de la GUI :
 
 ```
 --dem-source {srtm1,copernicus,ign_bdalti,ign_rgealti,ign_lidarhd}
@@ -176,7 +180,7 @@ Options en ligne de commande (passées avant le lancement de la GUI) :
 --output analyse_solaire.csv     # nom du CSV de sortie
 ```
 
-`python gpxsolar.py --help` liste toutes les options.
+`gpxsolar.exe --help` (ou `./gpxsolar --help`, ou `python gpxsolar.py --help`) liste toutes les options.
 
 ---
 
