@@ -4273,6 +4273,12 @@ def show_form(args, tz_finder, output_default, help_text):
     Interface graphique PyWebView (HTML/CSS/JS) — style identique à lidar2map.py.
     Communication bidirectionnelle Python <-> JS via l'objet Api exposé.
     """
+    # Forcer le backend Qt AVANT d'importer webview (pywebview peut lire
+    # PYWEBVIEW_GUI dès l'import). Windows+Linux : Qt au lieu de WinForms/.NET ;
+    # macOS : laissé au runtime hook du .app. En frozen, le runtime hook le pose
+    # déjà encore plus tôt — ceci fiabilise le mode `python gpxsolar.py` (dev).
+    if platform.system() in ("Windows", "Linux"):
+        os.environ.setdefault("PYWEBVIEW_GUI", "qt")
     import webview
     import json
 
@@ -4374,19 +4380,6 @@ def show_form(args, tz_finder, output_default, help_text):
             self._last_error = ""
             self._progress = {"value": 0, "text": "En attente..."}
             self.window = None
-            self._dbg("Api.__init__")
-
-        def _dbg(self, msg):
-            # Diagnostic frozen : écrit dans gpxsolar_gui_debug.log (cwd) si
-            # GPXSOLAR_GUIDEBUG est défini. Sert à vérifier que le bridge
-            # JS->Python répond en mode exe (poll_log est appelé en boucle).
-            if not os.environ.get("GPXSOLAR_GUIDEBUG"):
-                return
-            try:
-                with open("gpxsolar_gui_debug.log", "a", encoding="utf-8") as _f:
-                    _f.write(f"{datetime.now().isoformat()} frozen={getattr(sys,'frozen',False)} {msg}\n")
-            except Exception:
-                pass
 
         def _get_window(self):
             if self.window is None and webview.windows:
@@ -4401,24 +4394,19 @@ def show_form(args, tz_finder, output_default, help_text):
             return {"ok": ok}
 
         def pick_gpx(self):
-            self._dbg("pick_gpx:enter")
             w = self._get_window()
             if not w:
-                self._dbg("pick_gpx:no-window")
                 return ""
             try:
                 r = w.create_file_dialog(
                     webview.OPEN_DIALOG,
                     file_types=("GPX files (*.gpx)", "All files (*.*)"))
-                self._dbg(f"pick_gpx:result={r}")
                 return r[0] if r else ""
             except Exception as e:
-                self._dbg(f"pick_gpx:EXC {type(e).__name__}: {e}")
                 logging.warning(f"pick_gpx erreur: {e}")
                 return ""
 
         def poll_log(self):
-            self._dbg("poll_log")
             items = []
             try:
                 while True:
@@ -4572,16 +4560,12 @@ def show_form(args, tz_finder, output_default, help_text):
         f"window.INIT_DATA = {init_json};"
     )
 
-    # Backend Qt forcé sous Windows et Linux : PyQt6 + QtWebEngine au lieu de
-    # WinForms/WebView2+pythonnet sous Windows (régression pythonnet 3.1.0 +
-    # freezes WinForms). Même moteur Chromium sur les 3 OS. macOS : le runtime
-    # hook du .app pose déjà PYWEBVIEW_GUI=qt. À faire AVANT create_window.
+    # Muselle l'avertissement bénin de fermeture QtWebEngine
+    # ("Release of profile requested but WebEnginePage still not deleted") :
+    # ordre de destruction géré par pywebview, sans conséquence. Un handler de
+    # messages Qt filtre uniquement ce message ; tout le reste passe.
+    # (PYWEBVIEW_GUI=qt est déjà posé avant `import webview`, plus haut.)
     if platform.system() in ("Windows", "Linux"):
-        os.environ.setdefault("PYWEBVIEW_GUI", "qt")
-        # Muselle l'avertissement bénin de fermeture QtWebEngine
-        # ("Release of profile requested but WebEnginePage still not deleted") :
-        # ordre de destruction géré par pywebview, sans conséquence. Un handler
-        # de messages Qt filtre uniquement ce message ; tout le reste passe.
         try:
             from PyQt6 import QtCore as _QtCore
             _QT_NOISE = ("WebEnginePage still not deleted",
@@ -4616,7 +4600,6 @@ def show_form(args, tz_finder, output_default, help_text):
                 _w = max(900, min(_w, _wa_w - 48))
     except Exception:
         pass
-    api._dbg(f"window size -> {_w}x{_h}")
 
     win = webview.create_window(
         f"Simu Rando Solaire {APP_VERSION}",
@@ -4627,20 +4610,7 @@ def show_form(args, tz_finder, output_default, help_text):
         zoomable=True,
     )
     api.window = win
-    # Diagnostic : capture les logs internes de pywebview (renderer choisi,
-    # erreurs clr/bridge) dans gpxsolar_gui_debug.log si GPXSOLAR_GUIDEBUG défini.
-    if os.environ.get("GPXSOLAR_GUIDEBUG"):
-        try:
-            _h = logging.FileHandler("gpxsolar_gui_debug.log", encoding="utf-8")
-            _h.setFormatter(logging.Formatter("%(asctime)s PYWEBVIEW %(levelname)s %(message)s"))
-            for _ln in ("pywebview", "webview"):
-                _wl = logging.getLogger(_ln)
-                _wl.setLevel(logging.DEBUG)
-                _wl.addHandler(_h)
-        except Exception:
-            pass
-    # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12) pour
-    # diagnostiquer le bridge JS<->Python en mode frozen. Activé par --debug.
+    # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12). Via --debug.
     webview.start(debug=bool(getattr(args, "debug", False)))
 
 
