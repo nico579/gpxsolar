@@ -5,10 +5,12 @@ on:
     paths:
       - 'gpxsolar.py'
       - '_loader.py'
+      - 'deploy.py'
   pull_request:
     paths:
       - 'gpxsolar.py'
       - '_loader.py'
+      - 'deploy.py'
   workflow_dispatch:
 
 jobs:

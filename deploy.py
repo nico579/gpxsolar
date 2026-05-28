@@ -143,15 +143,24 @@ def fail(msg: str) -> "NoReturn":
 
 # === SHELL HELPERS ===========================================================
 
-def run(cmd, cwd=None, check=True, capture=False, env=None):
-    """Wrapper subprocess.run. capture=True -> renvoie stdout (texte)."""
-    result = subprocess.run(
-        cmd, cwd=str(cwd) if cwd else None,
-        check=False, text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        env=env,
-    )
+def run(cmd, cwd=None, check=True, capture=False, env=None, timeout=120):
+    """Wrapper subprocess.run. capture=True -> renvoie stdout (texte).
+
+    timeout : secondes avant abandon. 120s suffit pour la majorité des git/gh
+    opérations. Pour les commandes longues par nature (git clone d'un repo
+    avec gros assets, gh run watch sur update.yml, update_app.py --release
+    qui upload ~1,5 Go), passer un timeout explicite plus large au call site."""
+    try:
+        result = subprocess.run(
+            cmd, cwd=str(cwd) if cwd else None,
+            check=False, text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        fail(f"{' '.join(cmd)} a dépassé le timeout ({timeout}s) — réseau bloqué ou commande hangée ?")
     if check and result.returncode != 0:
         cmd_str = " ".join(cmd)
         err = (result.stderr or result.stdout or "").strip()
@@ -196,7 +205,8 @@ def clone_or_pull():
         cprint(f"==> Clone {REPO_URL} -> {CLONE}", "cyan")
         if CLONE.exists():
             shutil.rmtree(CLONE)
-        run(["git", "clone", REPO_URL, str(CLONE)])
+        # Clone initial : peut prendre 1-2 min (assets binaires, screenshots).
+        run(["git", "clone", REPO_URL, str(CLONE)], timeout=300)
 
 def remove_obsolete():
     cprint("\n==> Suppression des anciens chemins renommés", "cyan")
@@ -284,8 +294,10 @@ def invoke_cloud(repo: str, target_tag: str):
     print(f"    Run : https://github.com/{repo}/actions/runs/{run_id}")
 
     cprint("==> Surveillance du run (~6-7 min)", "cyan")
+    # update.yml dure typiquement 5-7 min ; on tolère jusqu'à 20 min pour rester
+    # robuste si le runner GitHub est lent ce jour-là.
     res = run(["gh", "run", "watch", str(run_id), "--repo", repo,
-               "--exit-status", "--interval", "20"], check=False)
+               "--exit-status", "--interval", "20"], check=False, timeout=1200)
     if res.returncode != 0:
         fail(f"le run update.yml a échoué : gh run view {run_id} --repo {repo} --log-failed")
 
@@ -312,7 +324,9 @@ def invoke_local(target_tag: str):
     if not update_app.exists():
         fail(f"update_app.py introuvable à côté ({update_app})")
 
-    run([py, str(update_app), "--release", "--tag", target_tag], env=env)
+    # update_app.py --release : download 3 assets + patch + upload ~1,5 Go
+    # depuis la connexion locale. Tolère jusqu'à 40 min pour les connexions lentes.
+    run([py, str(update_app), "--release", "--tag", target_tag], env=env, timeout=2400)
     cprint(f"\n==> OK. Bundles de {target_tag} patchés sans rebuild (local).", "green")
     print(f"    Release : https://github.com/{REPO_DEFAULT}/releases/tag/{target_tag}")
 
