@@ -91,6 +91,7 @@ Le onedir est buildé en **2 passes Analysis** :
 | `setup_build_mac.sh` | Prépare la machine macOS |
 | `update_app.py` | Patch du bundle (local / archive mac / release 3 OS) |
 | `push_github.ps1` | Synchronise les sources vers le repo GitHub |
+| `deploy_update.ps1` | **Déploiement auto en 1 commande** : détecte le diff et choisit push / `update.yml` / `release.yml` |
 | `ci_github.yml` → `…/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
 | `release_github.yml` → `…/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
 | `update_github.yml` → `…/update.yml` | **Update** : patche le code des 3 bundles d'une release, sans rebuild (manuel) |
@@ -211,6 +212,31 @@ Détails :
 **Règle** : pour livrer, **rester dans le cloud** — `release.yml` si deps/spec/
 launcher changent, sinon `update.yml` (fix de code, sans rebuild ni upload local).
 Le build local n'est que pour itérer/déboguer.
+
+### Déploiement automatique en une commande — `deploy_update.ps1`
+
+Plutôt que d'enchaîner à la main « push → déclencher update.yml → surveiller »,
+`deploy_update.ps1` **détecte ce qui a changé** et applique la bonne action :
+
+```powershell
+.\deploy_update.ps1 -Message "mon correctif"        # détecte + agit (dernière release)
+.\deploy_update.ps1 -Message "..." -Tag v1.0.2      # cible un tag précis pour update.yml
+.\deploy_update.ps1 -Message "..." -SkipPush        # force update.yml sans push ni détection
+```
+
+| Ce qui a changé (diff réel) | Action automatique |
+|---|---|
+| `gpxsolar.py` seul (code interne) | push **+ `update.yml`** sur la dernière release + surveillance du run |
+| `.spec` / `_loader.py` / `*_build.*` / `setup_build_*` | push **puis STOP** : indique de tagger pour `release.yml` (rebuild ; version = choix humain) |
+| docs / meta seules (README, BUILD, workflows, LICENSE, screenshots) | **push seul** — aucun binaire à toucher |
+
+Il s'appuie sur `push_github.ps1 -ChangedOutFile` (qui écrit la liste des fichiers
+réellement poussés) pour catégoriser sans dupliquer la table de fichiers.
+
+> ⚠️ **Angle mort** assumé : le bloc launcher et les dépendances vivent *dans*
+> `gpxsolar.py`. Si seul `gpxsolar.py` change, le script suppose un fix de code
+> interne (→ `update.yml`) et **affiche un avertissement** : si tu as touché au
+> bloc launcher ou aux deps, lance plutôt `release.yml` (rebuild) via un tag.
 
 ---
 

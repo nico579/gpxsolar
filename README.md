@@ -149,7 +149,7 @@ extrait + le venv).
 ## Utilisation
 
 Deux modes, sélectionnés automatiquement selon les arguments (même logique que
-le projet jumeau lidar2map) :
+le projet jumeau [lidar2map](https://github.com/nico579/lidar2map)) :
 
 - **Sans argument → interface graphique** (pywebview). Mode courant.
 - **Avec arguments → calcul en ligne de commande** (headless, sans fenêtre).
