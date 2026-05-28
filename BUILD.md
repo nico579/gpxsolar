@@ -274,3 +274,26 @@ shebang `#!/usr/bin/env python3`, faire `chmod +x deploy.py` la 1ère fois).
 - **macOS « application endommagée »** : quarantaine Gatekeeper, voir §3.
 - **Extraction concurrente bloquée** : supprime le lockfile
   `.gpxsolar_extracting` à côté du dossier applicatif, puis relance.
+
+### Spécifique Linux
+
+- **Qt « xcb plugin » au démarrage** : libs système manquantes.
+  `sudo apt install libxcb-cursor0 libegl1 libgl1` (Debian/Ubuntu).
+- **`ModuleNotFoundError: No module named 'venv'`** : le module venv de Python
+  est packagé séparément sur Debian/Ubuntu. `sudo apt install python3.12-venv`.
+- **Wayland, artefacts d'affichage Qt** : forcer X11 :
+  `QT_QPA_PLATFORM=xcb python3 gpxsolar.py`.
+
+### Spécifique macOS
+
+- **« application endommagée / développeur non identifié »** (Gatekeeper sur
+  `.app` non signé) : `xattr -dr com.apple.quarantine GPXSOLAR.app`, ou
+  clic droit → Ouvrir → Ouvrir quand même.
+- **Écran blanc dans la GUI** : QtWebEngine n'a pas trouvé son helper.
+  Vérifier que le build PyInstaller a généré le runtime hook
+  (cf. `gpxsolar_mac.spec`, section *Runtime hook*). En dev (script Python
+  direct), c'est piloté par `pyobjc-framework-WebKit` côté Cocoa.
+- **Apple Silicon, crash au démarrage / `mach-o, but wrong architecture`** :
+  vérifier que `python3` est arm64 :
+  `python3 -c "import platform; print(platform.machine())"` doit dire `arm64`
+  (sinon installer Python depuis python.org ou via Homebrew ARM).

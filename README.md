@@ -10,8 +10,9 @@ un récapitulatif CSV.
 
 > ⚠️ **Statut** : usage personnel diffusé. Développé et testé sur Windows 10/11.
 > Linux et macOS sont supportés par l'architecture de build mais testés
-> partiellement — voir [TEST_LINUX_MAC.md](TEST_LINUX_MAC.md). Retours bienvenus
-> via les [issues GitHub](https://github.com/nico579/gpxsolar/issues).
+> partiellement — cas connus + dépannage cross-OS dans la section *Dépannage*
+> de [BUILD.md](BUILD.md). Retours bienvenus via les
+> [issues GitHub](https://github.com/nico579/gpxsolar/issues).
 
 ---
 
@@ -245,8 +246,7 @@ de carte et les rayons solaires simulés.
 ## Documentation
 
 - **README utilisateur** : ce fichier
-- **Build & déploiement** : [BUILD.md](BUILD.md) — architecture du bundle, scripts par OS, mise à jour sans rebuild, dépannage
-- **Tests Linux/Mac** : [TEST_LINUX_MAC.md](TEST_LINUX_MAC.md)
+- **Build & déploiement** : [BUILD.md](BUILD.md) — architecture du bundle, scripts par OS, mise à jour sans rebuild, dépannage (incluant cas spécifiques Linux et macOS)
 - **Aide intégrée** : `python gpxsolar.py --help`
 
 ## Licence
