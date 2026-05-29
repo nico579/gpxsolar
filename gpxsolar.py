@@ -910,6 +910,7 @@ def _unwrap_inplace(mod, names):
 _unwrap_inplace(pysolar_solar, [
     "get_altitude",
     "get_azimuth",
+    "get_position",          # alt + az en UN seul calcul topocentrique
     "get_topocentric_position",
     "get_nutation",
     "get_coeff",
@@ -1024,31 +1025,52 @@ def fast_azimuth(lat, lon, dt_utc):
 
 
 
+def fast_position(lat, lon, dt_utc):
+    """Retourne (azimuth, altitude) en calculant la position topocentrique
+    UNE seule fois. pysolar.get_position partage get_topocentric_position
+    entre alt et az → résultats strictement identiques à un appel séparé de
+    get_altitude + get_azimuth, mais ~2× moins de calcul VSOP."""
+    f = pysolar_solar.get_position
+    if hasattr(f, "__wrapped__"):
+        return f.__wrapped__(lat, lon, dt_utc)
+    return f(lat, lon, dt_utc)
+
+
 GET_ALTITUDE = fast_altitude
 
 
 
 GET_AZIMUTH  = fast_azimuth
 
+GET_POSITION = fast_position
+
 class TransformerPool:
-    _wgs84_to_lambert = None
-    _lambert_to_wgs84 = None
-    
+    """Cache de Transformer pyproj, UN par thread.
+
+    pyproj.Transformer n'est pas thread-safe : deux threads qui appellent
+    .transform() sur la MÊME instance peuvent corrompre l'état interne PROJ
+    (objet de contexte partagé). compute_shadow_geotiff projette depuis
+    plusieurs workers (process_block : Lambert93→WGS84 ; get_values_vec_multi :
+    WGS84→Lambert93) → on isole une instance par thread via threading.local().
+    Construire un Transformer coûte ~1 ms, payé une fois par thread (4-8).
+    C'est le pattern recommandé par la doc pyproj plutôt qu'un lock global."""
+    _local = threading.local()
+
     @classmethod
     def wgs84_to_lambert(cls):
-        if cls._wgs84_to_lambert is None:
-            cls._wgs84_to_lambert = Transformer.from_crs(
-                "EPSG:4326", "EPSG:2154", always_xy=True
-            )
-        return cls._wgs84_to_lambert
-    
+        t = getattr(cls._local, "w2l", None)
+        if t is None:
+            t = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
+            cls._local.w2l = t
+        return t
+
     @classmethod
     def lambert_to_wgs84(cls):
-        if cls._lambert_to_wgs84 is None:
-            cls._lambert_to_wgs84 = Transformer.from_crs(
-                "EPSG:2154", "EPSG:4326", always_xy=True
-            )
-        return cls._lambert_to_wgs84
+        t = getattr(cls._local, "l2w", None)
+        if t is None:
+            t = Transformer.from_crs("EPSG:2154", "EPSG:4326", always_xy=True)
+            cls._local.l2w = t
+        return t
 
 
 
@@ -1093,6 +1115,11 @@ SHADOW_GPX_DIR = 'GPX_Ombres'
 CONFIG_FILE = 'gpx_analyzer_config.json'
 HISTORY_FILE = 'gpx_analyzer_history.json'
 HISTORY_MAX_ENTRIES = 30
+# Workers de la carte d'ombre : adaptatif au lieu d'un 4 codé en dur. Le gain
+# threads plafonne car pysolar (Python pur) ne relâche pas le GIL et numba
+# (parallel=True) sature déjà les cœurs → au-delà de cpu_count on sur-souscrit
+# (mesuré : sur 4 cœurs, w=4 bat w=8). cpu_count est donc un défaut sain.
+DEFAULT_NUM_WORKERS = os.cpu_count() or 4
 WGS84_A = 6378137.0
 WGS84_F = 1 / 298.257223563
 WGS84_E2 = 2 * WGS84_F - WGS84_F**2
@@ -1174,39 +1201,50 @@ class _BoundedDictCache:
     qui pouvait monter à des centaines de MB sur de longues sessions / grosses
     cartes d'ombre).
     """
-    __slots__ = ('_cache', 'max_size')
+    # _lock : SOLAR_CACHE est lu/écrit par les workers de compute_shadow_geotiff
+    # (ThreadPoolExecutor). get()+move_to_end() et popitem()+setitem() ne sont
+    # pas atomiques → sans lock, un thread peut move_to_end une clé qu'un autre
+    # vient de popitem → KeyError intermittent. Le GIL protège la mémoire, pas
+    # cette séquence. Lock léger, contention négligeable vs le coût pysolar.
+    __slots__ = ('_cache', 'max_size', '_lock')
 
     def __init__(self, max_size=500_000):
         self._cache = OrderedDict()
         self.max_size = max_size
+        self._lock = threading.Lock()
 
     def get(self, key, default=None):
-        v = self._cache.get(key)
-        if v is None:
-            return default
-        self._cache.move_to_end(key)
-        return v
+        with self._lock:
+            v = self._cache.get(key)
+            if v is None:
+                return default
+            self._cache.move_to_end(key)
+            return v
 
     def __getitem__(self, key):
-        v = self._cache[key]
-        self._cache.move_to_end(key)
-        return v
+        with self._lock:
+            v = self._cache[key]
+            self._cache.move_to_end(key)
+            return v
 
     def __setitem__(self, key, value):
-        if key in self._cache:
-            self._cache.move_to_end(key)
-        elif len(self._cache) >= self.max_size:
-            self._cache.popitem(last=False)
-        self._cache[key] = value
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            elif len(self._cache) >= self.max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = value
 
     def __contains__(self, key):
-        return key in self._cache
+        with self._lock:
+            return key in self._cache
 
     def __len__(self):
         return len(self._cache)
 
     def clear(self):
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
 
 SOLAR_CACHE = _BoundedDictCache(max_size=500_000)
@@ -1353,12 +1391,6 @@ def _q_coord_int(x, precision_factor=1e5):
     # Quantifie une coordonnée flottante en un entier pour la clé de cache
     return int(x * precision_factor + 0.5)
 
-def round_datetime(dt, round_sec):
-    """Arrondit un datetime à la `round_sec` seconde la plus proche."""
-    ts = int(dt.timestamp())
-    ts = (ts // round_sec) * round_sec
-    return datetime.fromtimestamp(ts, tz=pytz.utc)
-
 def solar_altaz_cached(lat, lon, dtutc, step_s=SOLAR_ROUND_SEC):
     """Cache solaire quantifié temporellement et spatialement.
     Clé alignée avec solar_altaz_cached_vec pour un cache PARTAGÉ
@@ -1375,17 +1407,21 @@ def solar_altaz_cached(lat, lon, dtutc, step_s=SOLAR_ROUND_SEC):
     if v is not None:
         return v
 
-    alt = GET_ALTITUDE(lat, lon, dtutc)
-    az  = GET_AZIMUTH(lat, lon, dtutc)
+    az, alt = GET_POSITION(lat, lon, dtutc)
 
     SOLAR_CACHE[key] = (alt, az)
     return alt, az
 
-def solar_altaz_cached_vec(lats, lons, dtutcs, step_s=SOLAR_ROUND_SEC):
-    """Version vectorisée + cache. La quantification (temps + coord) est
-    faite en NumPy pour la clé de cache ; pour les misses, pysolar est appelé
-    avec l'heure ORIGINALE (comme l'ancienne implémentation) afin que le
-    résultat final reste identique au calcul tkinter d'origine."""
+def solar_altaz_cached_vec(lats, lons, ts, step_s=SOLAR_ROUND_SEC):
+    """Version vectorisée + cache. `ts` = timestamps UTC (float, secondes
+    depuis l'epoch). La quantification (temps + coord) est faite en NumPy
+    pour la clé de cache ; pour les misses, pysolar est appelé avec l'heure
+    ORIGINALE reconstruite depuis ts[i] (résultat identique au calcul d'origine).
+
+    On prend des timestamps plutôt que des datetime pour éviter le double
+    aller-retour datetime↔timestamp : l'appelant (process_block, simulatehike)
+    possède déjà les timestamps, et on ne matérialise un objet datetime que
+    pour les misses de cache (rare quand la quantification 60 s mord)."""
     n = len(lats)
     alts = np.empty(n, dtype=np.float64)
     azs  = np.empty(n, dtype=np.float64)
@@ -1394,6 +1430,7 @@ def solar_altaz_cached_vec(lats, lons, dtutcs, step_s=SOLAR_ROUND_SEC):
 
     lats_arr = np.asarray(lats, dtype=np.float64)
     lons_arr = np.asarray(lons, dtype=np.float64)
+    ts_arr   = np.asarray(ts,   dtype=np.float64)
 
     # Quantification spatiale vectorisée (cohérent avec _q_coord)
     inv = 1.0 / SOLAR_ROUND_DEG
@@ -1401,19 +1438,18 @@ def solar_altaz_cached_vec(lats, lons, dtutcs, step_s=SOLAR_ROUND_SEC):
     lon_q = np.round(lons_arr * inv) * SOLAR_ROUND_DEG
 
     # Quantification temporelle vectorisée (cohérent avec _q_time)
-    ts = np.fromiter((dt.timestamp() for dt in dtutcs), dtype=np.float64, count=n)
     step_i = int(step_s)
-    ts_q = (ts.astype(np.int64) // step_i) * step_i  # entiers (timestamp UTC)
+    ts_q = (ts_arr.astype(np.int64) // step_i) * step_i  # entiers (timestamp UTC)
 
-    # Lookup cache + résolution des misses (pysolar appelé avec dt ORIGINAL)
+    # Lookup cache + résolution des misses (datetime construit uniquement au miss)
     for i in range(n):
         key = (float(lat_q[i]), float(lon_q[i]), int(ts_q[i]))
         v = SOLAR_CACHE.get(key)
         if v is not None:
             alts[i], azs[i] = v
         else:
-            a = GET_ALTITUDE(lats_arr[i], lons_arr[i], dtutcs[i])
-            z = GET_AZIMUTH(lats_arr[i], lons_arr[i], dtutcs[i])
+            dt_i = datetime.fromtimestamp(float(ts_arr[i]), tz=pytz.utc)
+            z, a = GET_POSITION(lats_arr[i], lons_arr[i], dt_i)
             alts[i] = a; azs[i] = z
             SOLAR_CACHE[key] = (a, z)
 
@@ -1670,6 +1706,7 @@ def compute_lidar_tiles_from_solar_rays_batched(
         dt_utc = start_time.replace(tzinfo=pytz.utc)
     else:
         dt_utc = start_time.astimezone(pytz.utc)
+    ts_utc = dt_utc.timestamp()
 
     # Pré-extraction lat/lon
     lats = np.array([p.latitude for p in points], dtype=np.float64)
@@ -1685,7 +1722,8 @@ def compute_lidar_tiles_from_solar_rays_batched(
 
         # Soleil (scalaire par point, mais hors boucle distance)
         # Utiliser le cache solaire pour les altitudes et azimuts
-        sun_alts_batch, sun_azs_batch = solar_altaz_cached_vec(lat_b, lon_b, [dt_utc] * nb, step_s=solar_step_s)
+        sun_alts_batch, sun_azs_batch = solar_altaz_cached_vec(
+            lat_b, lon_b, np.full(nb, ts_utc, dtype=np.float64), step_s=solar_step_s)
 
         sun_alt = sun_alts_batch # Utiliser l'altitude du cache
         valid = sun_alt > 0
@@ -2012,89 +2050,94 @@ class LidarManager:
     
     # NOTE : wrapper scalaire get_value supprimé (jamais appelé).
 
-    def get_values_vec(self, layer_key, lats, lons):
+    def get_values_vec_multi(self, layer_keys, lats, lons):
+        """Lecture vectorisée de PLUSIEURS couches (ex: ['mnt', 'mnh']) en
+        partageant la projection pyproj + le groupement par tuile, qui sont
+        identiques pour toutes les couches (mêmes coordonnées).
+
+        Le lock ne couvre QUE la projection et le lazy-load des tuiles ;
+        l'extraction NumPy (le gros du coût en carte d'ombre) tourne lock-free
+        sur des références de tuiles capturées sous lock — leurs `data` sont
+        immuables après chargement et restent vivantes via la référence même
+        si le cache LRU les évince entre-temps. Les workers de
+        compute_shadow_geotiff peuvent ainsi réellement paralléliser
+        l'extraction au lieu de se sérialiser sur un lock global.
+
+        Retourne {layer_key: np.ndarray(len(lats))}.
         """
-        Récupération vectorisée (NumPy unique) avec lazy loading (thread-safe).
-        """
+        n = len(lats)
+        out = {k: np.zeros(n, dtype=float) for k in layer_keys}
+        if n == 0:
+            return out
+
+        tile_size = 1000
+        present_layers = [k for k in layer_keys if k in self.rasters]
+        if not present_layers:
+            return out
+
+        # Projection HORS lock : transformer thread-local (cf. TransformerPool),
+        # donc pas de partage d'instance pyproj entre workers → pas besoin de
+        # sérialiser. Le groupement par tuile (np.unique) est purement local.
+        transformer = TransformerPool.wgs84_to_lambert()
+        xs, ys = transformer.transform(lons, lats)
+        xs = np.asarray(xs, dtype=np.float64)
+        ys = np.asarray(ys, dtype=np.float64)
+
+        # Indices de tuile (grille 1 km) + tuiles uniques via bit-pack 1D
+        txs = np.floor_divide(xs, tile_size).astype(np.int32)
+        tys = np.floor_divide(ys, tile_size).astype(np.int32)
+        tile_keys = (txs.astype(np.int64) << 32) | (tys.astype(np.int64) & 0xFFFFFFFF)
+        unique_keys, inverse_indices = np.unique(tile_keys, return_inverse=True)
+        tx_unique = (unique_keys >> 32).astype(np.int32)
+        ty_unique = (unique_keys & 0xFFFFFFFF).astype(np.int32)
+        unique_tiles = [(int(tx_unique[k]), int(ty_unique[k]))
+                        for k in range(len(unique_keys))]
+
+        # Lazy-load + capture des références de tuiles : SEULE section sous lock
+        # (mutation du cache LRU + chargement disque). Pour des tuiles déjà en
+        # RAM, fenêtre minuscule (lookups dict).
         with self.lock:
-            if layer_key not in self.rasters:
-                return np.zeros_like(lats, dtype=float)
-
-            xs, ys = self.transformer.transform(lons, lats)
-            xs = np.array(xs, dtype=np.float64)
-            ys = np.array(ys, dtype=np.float64)
-            
-            elevs = np.zeros(len(xs), dtype=float)
-            tile_size = 1000
-
-            # Étape 1: Calcul vectorisé des indices de tuile pour tous les points
-            txs = np.floor_divide(xs, tile_size).astype(np.int32)
-            tys = np.floor_divide(ys, tile_size).astype(np.int32)
-
-            # Étape 2: Identifier les tuiles uniques et obtenir les indices inverses (optimisé bit-pack)
-            # Utilisation du bit-pack pour créer une clé 1D unique pour chaque paire (tx, ty)
-            # Nécessite np.int64 pour stocker les deux entiers de 32 bits
-            tile_keys = (txs.astype(np.int64) << 32) | (tys.astype(np.int64) & 0xFFFFFFFF)
-            
-            unique_keys, inverse_indices = np.unique(tile_keys, return_inverse=True)
-            
-            # Reconstruire les tx et ty uniques à partir des clés uniques
-            tx_unique = (unique_keys >> 32).astype(np.int32)
-            ty_unique = (unique_keys & 0xFFFFFFFF).astype(np.int32)
-            
-            # Convertir les coordonnées uniques en tuples (tx, ty) pour la compatibilité avec la suite du code
-            unique_tiles = [(tx_unique[k], ty_unique[k]) for k in range(len(unique_keys))]
-
-            # Étape 3: Lazy loading des tuiles nécessaires
+            tiles_by_layer = {k: {} for k in present_layers}
             for tx, ty in unique_tiles:
-                if (tx, ty) not in self.rasters.get(layer_key, {}):
-                    if not self._load_tile_to_ram(layer_key, tx, ty):
-                        pass
                 self.used_tiles.add((tx, ty))
-            
-            # Étape 4: Extraire les altitudes, tuile par tuile
+                for k in present_layers:
+                    if self.rasters[k].get((tx, ty)) is None:
+                        self._load_tile_to_ram(k, tx, ty)
+                    tile = self.rasters[k].get((tx, ty))
+                    if tile is not None:
+                        tiles_by_layer[k][(tx, ty)] = tile
+
+        # --- Extraction lock-free (références capturées, data read-only) ---
+        for k in present_layers:
+            elevs = out[k]
+            layer_tiles = tiles_by_layer[k]
             for unique_idx, (tx, ty) in enumerate(unique_tiles):
-                tile = self.rasters[layer_key].get((tx, ty))
+                tile = layer_tiles.get((tx, ty))
                 if tile is None:
                     continue
-
-                # Masque pour sélectionner tous les points qui appartiennent à cette tuile unique
                 mask = (inverse_indices == unique_idx)
-                
-                # Coordonnées des points dans cette tuile
                 xs_tile = xs[mask]
                 ys_tile = ys[mask]
-                
                 if xs_tile.size == 0:
                     continue
-
-                # Conversion coordonnées -> indices de pixels (optimisé avec inv_transform)
                 data = tile['data']
                 nodata = tile.get('nodata', -9999)
-                # Utilise directement l'inverse de la transformation affine pour un calcul vectorisé
                 cols_f, rows_f = tile['inv_transform'] * (xs_tile, ys_tile)
                 rows = rows_f.astype(np.int32)
                 cols = cols_f.astype(np.int32)
-                
                 h, w = data.shape
                 valid_mask = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
-
                 if not np.any(valid_mask):
                     continue
-
-                # Extraire les valeurs valides
-                valid_rows = rows[valid_mask]
-                valid_cols = cols[valid_mask]
-                
-                vals = data[valid_rows, valid_cols].astype(float)
+                vals = data[rows[valid_mask], cols[valid_mask]].astype(float)
                 vals[vals == nodata] = 0.0
-                
-                # Placer les valeurs dans le tableau de sortie aux bons endroits
-                # Les indices de sortie sont les indices originaux des points correspondant à ce masque
                 output_indices = np.where(mask)[0][valid_mask]
                 elevs[output_indices] = vals
-            
-            return elevs
+        return out
+
+    def get_values_vec(self, layer_key, lats, lons):
+        """Récupération vectorisée d'UNE couche (cf. get_values_vec_multi)."""
+        return self.get_values_vec_multi([layer_key], lats, lons)[layer_key]
 
 
 
@@ -2123,7 +2166,6 @@ class HGTDataManager:
         self.srtm_data = None
 
         self.ign_grid_tiles = {}
-        self.ign_transformer = None
         self.lidar_manager = None
         self.elevation_cache = {}
         self.elevation_cache_lock = threading.Lock()
@@ -2148,7 +2190,8 @@ class HGTDataManager:
             self.lidar_manager = LidarManager(self.log, self.progress_callback) 
         elif self.source.startswith('ign_'):
             if not PYPROJ_AVAILABLE: raise MissingDataError("pyproj non installé.")
-            self.ign_transformer = TransformerPool.wgs84_to_lambert()
+            # Transformer obtenu à la demande via TransformerPool (thread-local),
+            # plus d'instance partagée stockée sur self (cf. _get_ign_elevations_vec).
 
         else:
              if not os.path.exists(hgt_dir): os.makedirs(hgt_dir)
@@ -2294,11 +2337,25 @@ class HGTDataManager:
         if self.lidar_manager:
             # MNH est déjà une hauteur relative (pas besoin de soustraire MNT)
             return self.lidar_manager.get_values_vec('mnh', lats, lons)
-            
+
         if self.vegetation_manager:
             return self.vegetation_manager.get_vegetation_heights_vec(lats, lons)
-        
+
         return np.zeros_like(lats, dtype=float)
+
+    def get_ground_and_object_elevations_vec(self, lats, lons):
+        """Renvoie (sol, hauteur_objets) en UNE passe quand c'est possible.
+
+        Source LiDAR : MNT et MNH partagent projection + groupement de tuiles
+        → un seul get_values_vec_multi au lieu de deux passes redondantes
+        (projection pyproj + np.unique + lock x2). Autres sources : sol (DEM)
+        et objets (végétation WorldCover) viennent de données distinctes, pas
+        de partage possible → on retombe sur les deux appels séparés."""
+        if self.lidar_manager:
+            r = self.lidar_manager.get_values_vec_multi(['mnt', 'mnh'], lats, lons)
+            return r['mnt'], r['mnh']
+        return (self.get_ground_elevations_vec(lats, lons),
+                self.get_object_heights_vec(lats, lons))
 
     def _get_bdalti_download_info(self, department_code):
         dept_id = department_code.zfill(3) if department_code.isdigit() else department_code
@@ -2607,7 +2664,9 @@ class HGTDataManager:
             return float(val) if val != nodata else 0.0
         return 0.0
     def _get_ign_elevation(self, lat, lon):
-        x, y = self.ign_transformer.transform(lon, lat)
+        # Transformer thread-local (cf. TransformerPool) : ce chemin tourne dans
+        # les workers de compute_shadow_geotiff, pas de partage d'instance pyproj.
+        x, y = TransformerPool.wgs84_to_lambert().transform(lon, lat)
         tile_size = 1000
         tx = int(x // tile_size)
         ty = int(y // tile_size)
@@ -2753,8 +2812,10 @@ class HGTDataManager:
             return np.zeros_like(lats, dtype=np.float64)
 
         elevations = np.zeros_like(lats, dtype=np.float64)
-        
-        xs, ys = self.ign_transformer.transform(lons, lats)
+
+        # Transformer thread-local (cf. TransformerPool) — appelé depuis les
+        # workers de compute_shadow_geotiff sans sérialisation.
+        xs, ys = TransformerPool.wgs84_to_lambert().transform(lons, lats)
         xs = np.array(xs, dtype=np.float64)
         ys = np.array(ys, dtype=np.float64)
 
@@ -3000,31 +3061,31 @@ def _nearest_seg_with_param(xs, ys, x1, y1, x2, y2):
         best_t[k:k+chunk]   = t[np.arange(idx.size), idx]
     return best_idx, best_t
 
-def get_sun_blocking_type_vec(points_batch, hgt_manager, local_tz, solar_step_s=SOLAR_ROUND_SEC):
+def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_ROUND_SEC):
     """
     Calcule le type d'obstacle pour un LOT de points via Ray Tracing vectorisé.
+
+    Args:
+        lats, lons : arrays float64 des coordonnées WGS84.
+        ts         : array float64 des timestamps UTC (secondes depuis l'epoch).
+        hgt_manager, solar_step_s : cf. HGTDataManager.
+
     Retourne deux listes alignées:
       - listes de statuts ('RELIEF', 'VEGETATION', 'SUN', 'NIGHT', 'RELIEF_VEG')
       - liste de shadow_hit (lat, lon) ou None lorsque pas d'empreinte trouvée
+
+    Prend des arrays (pas des objets GPXTrackPoint) : l'appelant carte d'ombre
+    génère des dizaines de milliers de pixels par bloc — créer autant d'objets
+    Python juste pour les re-décomposer en arrays était du gaspillage pur.
     """
-    n_pts = len(points_batch)
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+    n_pts = lats.size
     if n_pts == 0:
         return [], []
 
-    # 1. Extraire les données en arrays NumPy
-    lats = np.array([p.latitude for p in points_batch], dtype=np.float64)
-    lons = np.array([p.longitude for p in points_batch], dtype=np.float64)
-    # times = [p.time for p in points_batch] # Not directly used in this function
-
-    # 2. Calculer les positions solaires (avec cache)
-    dt_utcs = [p.time for p in points_batch] # p.time est déjà UTC aware
-
-    # Vérification UTC-aware
-    if dt_utcs and dt_utcs[0].tzinfo is None:
-        raise ValueError("Datetime must be timezone-aware (UTC).")
-    
-    # Utiliser le cache solaire
-    sun_alts, sun_azs_full = solar_altaz_cached_vec(lats, lons, dt_utcs, step_s=solar_step_s)
+    # Positions solaires (avec cache) — ts = timestamps UTC déjà en main
+    sun_alts, sun_azs_full = solar_altaz_cached_vec(lats, lons, ts, step_s=solar_step_s)
     
     # STATUS_MAP: 0=SUN, 1=RELIEF, 2=VEGETATION, 3=RELIEF_VEG, 4=NIGHT
     STATUS_MAP_INV = {0: 'SUN', 1: 'RELIEF', 2: 'VEGETATION', 3: 'RELIEF_VEG', 4: 'NIGHT'}
@@ -3070,8 +3131,12 @@ def get_sun_blocking_type_vec(points_batch, hgt_manager, local_tz, solar_step_s=
     ray_altitudes = ray_start_altitudes[:, None] + distances[None, :] * np.tan(rad_alts)[:, None] + distances[None, :]**2 / (2 * EARTH_RADIUS)
 
     # 6. Obtenir le profil d'altitude du terrain et des obstacles
-    ground_profile = hgt_manager.get_ground_elevations_vec(ray_lats.ravel(), ray_lons.ravel()).reshape(ray_lats.shape)
-    object_heights = hgt_manager.get_object_heights_vec(ray_lats.ravel(), ray_lons.ravel()).reshape(ray_lats.shape)
+    #    (sol + objets en une passe : partage projection + tuiles en LiDAR)
+    flat_lats = ray_lats.ravel()
+    flat_lons = ray_lons.ravel()
+    ground_flat, object_flat = hgt_manager.get_ground_and_object_elevations_vec(flat_lats, flat_lons)
+    ground_profile = ground_flat.reshape(ray_lats.shape)
+    object_heights = object_flat.reshape(ray_lats.shape)
 
     # Appliquer le shadow_mode à la SOURCE du ray-tracing
     shadow_mode = getattr(hgt_manager, 'shadowmode', 'both')  # Récupérer le mode depuis hgtmanager
@@ -3144,9 +3209,6 @@ def get_sun_blocking_type_vec(points_batch, hgt_manager, local_tz, solar_step_s=
     
     return final_statuses_str, shadow_hits
 
-def tobler_speed(slope_ratio):
-    return (6 * math.exp(-3.5 * abs(slope_ratio + 0.05))) / 3.6
-
 def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
                  progresscallback=None, batch_size=256, solar_step_s=SOLAR_ROUND_SEC):
 
@@ -3211,8 +3273,9 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
     # Mettre à jour le shadowmode dans hgtmanager avant le ray-tracing
     hgtmanager.shadowmode = shadowmode
     for i in range(0, totalpoints, batch_size):
-        batch = simpoints[i:i + batch_size]
-        batchstatuses, batch_shadow_hits = get_sun_blocking_type_vec(batch, hgtmanager, localtz, solar_step_s)
+        sl = slice(i, i + batch_size)
+        batchstatuses, batch_shadow_hits = get_sun_blocking_type_vec(
+            alllats[sl], alllons[sl], times_ts[sl], hgtmanager, solar_step_s)
         allstatuses.extend(batchstatuses)
         all_shadow_hits.extend(batch_shadow_hits)
 
@@ -3299,9 +3362,17 @@ def aligned_bbox_from_processeddata(processeddata, res, transformer_l93, margin_
 
 
 def build_time_function_segmented(trace_points_with_time, transformer_l93):
-    """Version HYBRIDE: STRtree + validation manuelle pour une interpolation de temps robuste.
-    Retourne (t_of_xy, t_of_xy_vec) — la version vectorisée traite un batch
-    de pixels en un seul appel via un kernel Numba parallèle."""
+    """Construit l'interpolateur temporel vectorisé t_of_xy_vec(xs, ys).
+
+    Pour chaque pixel, on cherche le segment de trace le plus proche puis on
+    interpole le temps le long de ce segment (projection paramétrique). Le
+    coût brut est O(n_pixels × n_segments). Pour une longue trace, c'est le
+    poste dominant de la carte d'ombre → on PRÉFILTRE les segments par bloc
+    (cf. _nearest dans t_of_xy_vec) : seuls les segments susceptibles d'être
+    le plus proche d'un pixel du bloc sont conservés.
+
+    (L'ancienne variante scalaire STRtree t_of_xy n'était jamais appelée par
+    compute_shadow_geotiff — supprimée avec son arbre, construit pour rien.)"""
     n_seg = max(0, len(trace_points_with_time) - 1)
 
     # Pré-projection vectorisée des endpoints en Lambert93
@@ -3320,58 +3391,55 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
     else:
         seg_x1 = seg_y1 = seg_x2 = seg_y2 = seg_t1 = seg_t2 = np.zeros(0, dtype=np.float64)
 
-    # STRtree pour la version scalaire (fallback / appels isolés)
-    segments = [LineString([(seg_x1[i], seg_y1[i]), (seg_x2[i], seg_y2[i])])
-                for i in range(n_seg)]
-    times = [(trace_points_with_time[i].time, trace_points_with_time[i+1].time)
-             for i in range(n_seg)]
-    tree = STRtree(segments) if segments else None
-
     logging.info("Interpolation temporelle : %d segments [%s]",
                  n_seg, "Numba" if NUMBA_AVAILABLE else "NumPy")
     if n_seg > 0:
         logging.info("   Début : %s, Fin : %s",
-                     times[0][0].strftime('%H:%M'),
-                     times[-1][1].strftime('%H:%M'))
+                     trace_points_with_time[0].time.strftime('%H:%M'),
+                     trace_points_with_time[-1].time.strftime('%H:%M'))
 
-    def t_of_xy(x, y):
-        """Interpolation scalaire (1 point) — STRtree + validation."""
-        if not segments:
-            return trace_points_with_time[0].time
-        p = Point(x, y)
-        nearest_idx = tree.nearest(p)
-        search_range = range(max(0, nearest_idx - 5),
-                             min(len(segments), nearest_idx + 6))
-        min_dist = float('inf'); best_idx = nearest_idx
-        for i in search_range:
-            d = p.distance(segments[i])
-            if d < min_dist:
-                min_dist = d; best_idx = i
-        seg = segments[best_idx]; t1, t2 = times[best_idx]
-        s_on_seg = seg.project(p)
-        seg_length = seg.length
-        if seg_length < 1e-6:
-            return t1
-        ratio = s_on_seg / seg_length
-        t_interp = t1.timestamp() + ratio * (t2.timestamp() - t1.timestamp())
-        return datetime.fromtimestamp(t_interp, tz=pytz.utc)
+    def _prefilter_segments(xs, ys):
+        """Indices des segments pouvant être le plus proche d'UN pixel du bloc.
 
-    def _nearest_numpy(xs, ys):
+        Borne provablement sûre : soit C le centre du bloc et r son demi-
+        diagonal (donc tout pixel p vérifie dist(C,p) ≤ r). Pour le segment
+        S* le plus proche de C, tout pixel a un voisin à distance
+        ≤ r + min(dC). Donc le vrai plus proche S d'un pixel vérifie
+        dist(C,S) ≤ 2r + min(dC). On garde dC ≤ min(dC) + 2r — jamais le
+        vrai plus proche n'est écarté (les ex æquo sont tous conservés, donc
+        l'argmin — premier minimum — est identique au calcul sur tous les
+        segments)."""
+        xmin = xs.min(); xmax = xs.max()
+        ymin = ys.min(); ymax = ys.max()
+        cx = 0.5 * (xmin + xmax); cy = 0.5 * (ymin + ymax)
+        r = 0.5 * math.hypot(xmax - xmin, ymax - ymin)
+        # Distance² du centre C à chaque segment (point→segment, vectorisé)
+        dx = seg_x2 - seg_x1; dy = seg_y2 - seg_y1
+        L2 = dx * dx + dy * dy
+        L2_safe = np.where(L2 < 1e-12, 1.0, L2)
+        t = ((cx - seg_x1) * dx + (cy - seg_y1) * dy) / L2_safe
+        t = np.clip(t, 0.0, 1.0)
+        qx = seg_x1 + t * dx; qy = seg_y1 + t * dy
+        dC = np.hypot(cx - qx, cy - qy)
+        thr = dC.min() + 2.0 * r
+        return np.where(dC <= thr)[0]
+
+    def _nearest_numpy(xs, ys, sx1, sy1, sx2, sy2):
         """Fallback NumPy si Numba absent — tiled pour la mémoire."""
-        n = xs.size; m = seg_x1.size
+        n = xs.size; m = sx1.size
         best_idx = np.empty(n, dtype=np.int64)
         best_t   = np.empty(n, dtype=np.float64)
         chunk = max(1024, min(8192, 65536 // max(1, m)))
         for k in range(0, n, chunk):
             px = xs[k:k+chunk, None]; py = ys[k:k+chunk, None]
-            dx = (seg_x2 - seg_x1)[None, :]
-            dy = (seg_y2 - seg_y1)[None, :]
+            dx = (sx2 - sx1)[None, :]
+            dy = (sy2 - sy1)[None, :]
             L2 = dx*dx + dy*dy
             L2_safe = np.where(L2 < 1e-12, 1.0, L2)
-            t = ((px - seg_x1[None, :])*dx + (py - seg_y1[None, :])*dy) / L2_safe
+            t = ((px - sx1[None, :])*dx + (py - sy1[None, :])*dy) / L2_safe
             t = np.clip(t, 0.0, 1.0)
-            qx = seg_x1[None, :] + t*dx
-            qy = seg_y1[None, :] + t*dy
+            qx = sx1[None, :] + t*dx
+            qy = sy1[None, :] + t*dy
             d2 = (px - qx)**2 + (py - qy)**2
             idx = np.argmin(d2, axis=1)
             best_idx[k:k+chunk] = idx
@@ -3386,13 +3454,20 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
             ts0 = (trace_points_with_time[0].time.timestamp()
                    if trace_points_with_time else 0.0)
             return np.full(xs.size, ts0, dtype=np.float64)
-        if NUMBA_AVAILABLE:
-            bi, bt = _nearest_seg_with_param(xs, ys, seg_x1, seg_y1, seg_x2, seg_y2)
-        else:
-            bi, bt = _nearest_numpy(xs, ys)
-        return seg_t1[bi] + bt * (seg_t2[bi] - seg_t1[bi])
 
-    return t_of_xy, t_of_xy_vec
+        # Préfiltrage spatial : restreint l'ensemble des segments candidats.
+        keep = _prefilter_segments(xs, ys)
+        sx1 = np.ascontiguousarray(seg_x1[keep]); sy1 = np.ascontiguousarray(seg_y1[keep])
+        sx2 = np.ascontiguousarray(seg_x2[keep]); sy2 = np.ascontiguousarray(seg_y2[keep])
+
+        if NUMBA_AVAILABLE:
+            bi, bt = _nearest_seg_with_param(xs, ys, sx1, sy1, sx2, sy2)
+        else:
+            bi, bt = _nearest_numpy(xs, ys, sx1, sy1, sx2, sy2)
+        gi = keep[bi]   # indices locaux (sous-ensemble) → indices globaux
+        return seg_t1[gi] + bt * (seg_t2[gi] - seg_t1[gi])
+
+    return t_of_xy_vec
 
 
 
@@ -3419,23 +3494,16 @@ def process_block(args):
     x_flat = np.ascontiguousarray(x_coords.ravel())
     y_flat = np.ascontiguousarray(y_coords.ravel())
 
-    # Interpolation temporelle vectorisée (1 appel pour tous les pixels)
+    # Interpolation temporelle vectorisée (1 appel pour tous les pixels) :
+    # ts_arr (timestamps UTC) est passé tel quel — plus de matérialisation de
+    # dizaines de milliers d'objets datetime puis re-conversion en timestamps.
     ts_arr = t_of_xy_vec(x_flat, y_flat)  # array float64 de timestamps UTC
-    dt_utcs = [datetime.fromtimestamp(float(t), tz=pytz.utc) for t in ts_arr]
 
     transformer_wgs84 = TransformerPool.lambert_to_wgs84()
     lons, lats = transformer_wgs84.transform(x_flat, y_flat)
 
-    class GPXPointDummy:
-        __slots__ = ('latitude', 'longitude', 'time')
-        def __init__(self, lat, lon, time):
-            self.latitude = lat
-            self.longitude = lon
-            self.time = time
-
-    dummy_points = [GPXPointDummy(lat, lon, dt) for lat, lon, dt in zip(lats, lons, dt_utcs)]
-
-    statuses, _ = get_sun_blocking_type_vec(dummy_points, hgt_manager, pytz.utc, solar_step_s=hgt_manager.solar_step_s)
+    statuses, _ = get_sun_blocking_type_vec(
+        lats, lons, ts_arr, hgt_manager, solar_step_s=hgt_manager.solar_step_s)
 
     # Conversion statuts → uint8 vectorisée via dict.get sur la liste (rapide)
     numeric_statuses = np.fromiter(
@@ -3467,7 +3535,7 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     
     # ✅ NOUVELLE LOGIQUE: Interpolation temporelle par segment (plus précise)
     trace_points_with_time = [item['point'] for item in processed_data]
-    t_of_xy, t_of_xy_vec = build_time_function_segmented(trace_points_with_time, transformer_l93)
+    t_of_xy_vec = build_time_function_segmented(trace_points_with_time, transformer_l93)
     log_func("Fonction d'interpolation temporelle par segment créée.")
     
     profile = {
@@ -4367,7 +4435,7 @@ def show_form(args, tz_finder, output_default, help_text):
         'visualize_tiles': bool(config.get('visualize_tiles', False)),
         'generate_shadow_map': bool(config.get('generate_shadow_map', False)),
         'analysis_type': config.get('analysis_type', 'ombre_soleil'),
-        'num_workers': str(config.get('num_workers', '4')),
+        'num_workers': str(config.get('num_workers', DEFAULT_NUM_WORKERS)),
         'visualize_sun_rays': bool(config.get('visualize_sun_rays', False)),
         'sun_ray_interval': str(config.get('sun_ray_interval', '20')),
     }
@@ -4460,7 +4528,7 @@ def show_form(args, tz_finder, output_default, help_text):
                     'visualize_tiles': bool(cfg.get('visualize_tiles', False)),
                     'generate_shadow_map': bool(cfg.get('generate_shadow_map', False)),
                     'analysis_type': cfg.get('analysis_type', 'ombre_soleil'),
-                    'num_workers': str(cfg.get('num_workers', '4')),
+                    'num_workers': str(cfg.get('num_workers', DEFAULT_NUM_WORKERS)),
                     'visualize_sun_rays': bool(cfg.get('visualize_sun_rays', False)),
                     'sun_ray_interval': str(cfg.get('sun_ray_interval', '20')),
                 }
@@ -5502,8 +5570,8 @@ def main():
                          help='Taille de lot du calcul (défaut: 256).')
     grp_cli.add_argument('--solar-step-s', type=int, default=60,
                          help='Pas temporel du soleil en secondes (défaut: 60).')
-    grp_cli.add_argument('--num-workers', type=int, default=4,
-                         help='Workers parallèles pour la carte d\'ombre (défaut: 4).')
+    grp_cli.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS,
+                         help=f'Workers parallèles pour la carte d\'ombre (défaut: {DEFAULT_NUM_WORKERS} = nb de cœurs).')
     grp_cli.add_argument('--margin-meters', type=int, default=500,
                          help='Marge autour de la trace en mètres (défaut: 500).')
     grp_cli.add_argument('--open', action='store_true',
