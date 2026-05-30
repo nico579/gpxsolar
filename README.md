@@ -1,6 +1,18 @@
 # gpxsolar
 
-**Analyse d'ensoleillement d'une randonnée GPX — ombres de relief (MNT/MNH) et de végétation — sorties KMZ (Google Earth), MBTiles + KML (Locus Map / OsmAnd) et CSV.**
+### Serai-je au soleil ou à l'ombre sur ma rando ?
+
+gpxsolar lance un rayon vers le soleil depuis **chaque point** d'une trace GPX et
+le teste contre le relief **et** la végétation (LiDAR HD 0,5 m / IGN), pour une
+date et une heure données. Il te dit, mètre par mètre, soleil ou ombre.
+
+![Animation : l'ombre portée balaie le versant le long d'une randonnée à 9h, 13h et 18h — vue satellite 3D Google Earth, tracé coloré soleil/ombre](screenshots/hero.png)
+
+> *Will I be in sun or shade on my hike?* gpxsolar ray-traces the sun against
+> terrain **and** vegetation (0.5 m LiDAR) along a GPX track, for a given date
+> and time — point by point, sun or shade.
+
+**Sorties : KMZ (Google Earth), overlay MBTiles + trace KML (Locus Map / OsmAnd) et CSV.**
 
 Script Python autonome qui prend une trace GPX, une date et une heure de départ,
 puis calcule pour chaque point du parcours s'il est au soleil ou à l'ombre, en
