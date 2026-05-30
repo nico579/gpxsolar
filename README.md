@@ -309,6 +309,13 @@ Principales options (liste complète : `gpxsolar.exe --help`) :
 
 ## Captures d'écran
 
+### L'ombre au fil de la journée
+
+La même randonnée à 9h, 13h et 18h (vue satellite 3D, Google Earth) : l'ombre
+portée balaie le versant à mesure que le soleil tourne.
+
+![La même randonnée à 9h, 13h et 18h : l'ombre portée se déplace sur le versant](screenshots/georezo_montage.jpg)
+
 ### Interface graphique
 
 Formulaire pywebview : choix du GPX, date et heure de départ, source d'altitude
