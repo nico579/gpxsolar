@@ -3586,6 +3586,31 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     
 
 
+# Palette carte d'ombre : code statut uint8 → RGBA. Source de vérité unique
+# partagée par l'export KMZ ET l'export MBTiles.
+#
+# La semi-transparence est BAKÉE dans les pixels (alpha SHADOW_OVERLAY_ALPHA),
+# et il FAUT laisser l'opacité du calque à 100 % côté app. Raison (contre-
+# intuitive) : Locus/OsmAnd composent un calque semi-transparent tuile par
+# tuile ; quand on baisse l'opacité DU CALQUE, les bords de tuiles ne fusionnent
+# pas et des COUTURES apparaissent. Avec la transparence bakée + calque à 100 %,
+# chaque tuile n'est dessinée qu'une fois (pas de re-composition d'opacité) →
+# pas de couture, et le fond transparaît quand même. Le KMZ (image unique) n'a
+# pas ce souci mais utilise la même teinte/alpha pour un rendu identique.
+# nodata (255) → alpha 0 (hors emprise totalement transparent).
+SHADOW_OVERLAY_ALPHA = 110   # ≈43 % — bakée dans le KMZ et les tuiles MBTiles
+SHADOW_RGB = {
+    0: (255, 255, 0),    # SUN → jaune
+    1: (160, 160, 160),  # RELIEF → gris
+    2: (0,   153, 0),    # VEGETATION → vert
+    3: (165, 42,  42),   # RELIEF + VEGETATION → marron
+    4: (0,   0,   0),    # NIGHT → noir
+}
+SHADOW_COLOR_MAP = {c: (r, g, b, SHADOW_OVERLAY_ALPHA)
+                    for c, (r, g, b) in SHADOW_RGB.items()}
+SHADOW_COLOR_MAP[255] = (0, 0, 0, 0)   # nodata → transparent
+
+
 def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_kml_obj=None, progress_callback=None):
     """
     Convertit un GeoTIFF de carte d'ombre en une image PNG colorisée
@@ -3599,16 +3624,7 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
     log_func("DEBUG: Démarrage de la conversion GeoTIFF -> KML GroundOverlay (avec Pillow).")
     png_path = tif_path.replace(".tif", ".png")
 
-    # Palette de couleurs (R, G, B, A)
-    ALPHA = 100  # bon compromis
-    color_map = {
-        0: (255, 255, 0, ALPHA),     # SUN → jaune
-        1: (160, 160, 160, ALPHA),   # RELIEF → gris
-        2: (0, 153, 0, ALPHA),       # VEGETATION → vert
-        3: (165, 42, 42, ALPHA),     # RELIEF + VEGETATION → marron
-        4: (0, 0, 0, ALPHA),         # NIGHT
-        255: (0, 0, 0, 0)
-    }
+    color_map = SHADOW_COLOR_MAP
 
     try:
         with rasterio.open(tif_path) as src:
@@ -3640,20 +3656,25 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
         # Ajouter le PNG à l'archive et définir la référence
         go.icon.href = kml.addfile(png_path)
         
-        # Obtenir les bornes du GeoTIFF et les reprojeter en WGS84
+        # Placer l'image par ses 4 COINS RÉELS (gx:LatLonQuad), pas dans une
+        # boîte lat/lon nord-haut. Une LatLonBox suppose nord-grille = nord
+        # géographique : faux en Lambert93 (convergence des méridiens ~2° à
+        # 5,9°E), ce qui décalait l'overlay de ~100 m aux coins (l'ombre ne
+        # tombait plus sur la trace). Le quad épouse le rectangle Lambert93 réel
+        # → overlay aligné sur la trace dans Google Earth.
+        # NB : QGIS ne rend PAS les GroundOverlay gx:LatLonQuad (limite OGR/KML).
+        # Pour le SIG, utiliser le GeoTIFF (EPSG:2154) ou le MBTiles (EPSG:3857),
+        # tous deux exacts ; le KMZ est un livrable Google Earth.
         with rasterio.open(tif_path) as src:
-            bounds_lambert93 = src.bounds
-            
+            bl = src.bounds
             transformer_wgs84 = TransformerPool.lambert_to_wgs84()
-            
-            west, south = transformer_wgs84.transform(bounds_lambert93.left, bounds_lambert93.bottom)
-            east, north = transformer_wgs84.transform(bounds_lambert93.right, bounds_lambert93.top)
-            
-            go.latlonbox.north = north
-            go.latlonbox.south = south
-            go.latlonbox.east = east
-            go.latlonbox.west = west
-            go.latlonbox.rotation = 0
+            # Ordre KML gx:LatLonQuad : sens antihoraire depuis le bas-gauche
+            # de l'image (SW, SE, NE, NW), en (lon, lat).
+            sw = transformer_wgs84.transform(bl.left,  bl.bottom)
+            se = transformer_wgs84.transform(bl.right, bl.bottom)
+            ne = transformer_wgs84.transform(bl.right, bl.top)
+            nw = transformer_wgs84.transform(bl.left,  bl.top)
+            go.gxlatlonquad.coords = [sw, se, ne, nw]
 
         kml.savekmz(kmz_output_path) # kmz_output_path est maintenant le chemin du KMZ
         log_func(f"DEBUG: KMZ GroundOverlay créé: {kmz_output_path}")
@@ -3662,6 +3683,174 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
         log_func(f"ERREUR: Impossible de créer le KMZ GroundOverlay: {e}")
         traceback.print_exc()
         return None
+
+
+def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
+                               zoom_min=None, zoom_max=None,
+                               progress_callback=None):
+    """
+    Convertit le GeoTIFF de carte d'ombre (EPSG:2154, uint8 catégoriel) en un
+    MBTiles overlay : tuiles PNG RGBA transparentes, en Web Mercator (EPSG:3857).
+
+    But : charger la carte d'ombre comme CALQUE transparent dans les apps GPS
+    smartphone qui lisent le MBTiles (Locus Map, OsmAnd, OruxMaps, Guru Maps…),
+    par-dessus le fond de carte topo. MBTiles = format standard (SQLite avec un
+    schéma défini), même pipeline que lidar2map mais avec deux spécialisations
+    voulues par la nature du raster :
+      - resampling NEAREST (pas bilinear) : raster CATÉGORIEL (codes 0=soleil …
+        4=nuit, 255=nodata). Interpoler entre catégories produirait des codes
+        intermédiaires absurdes (lidar2map est en hillshade continu → bilinear).
+      - tuiles PNG RGBA (pas JPEG) : un overlay doit être transparent
+        (nodata 255 → alpha 0 → le fond de carte transparaît).
+
+    Réutilise SHADOW_COLOR_MAP : rendu identique à l'overlay KML.
+    """
+    if not PIL_AVAILABLE:
+        log_func("ERREUR: Pillow requis pour l'export MBTiles.")
+        return None
+
+    import sqlite3, io
+
+    from rasterio.warp import reproject, Resampling
+    from rasterio.transform import from_origin
+
+    EARTH_CIRC = 20037508.3427892   # demi-circonférence Mercator (m)
+    EARTH_R    = 6378137.0           # rayon sphère Web Mercator (m)
+    TILE_SIZE  = 256
+
+    def merc_to_tile(mx, my, z):
+        n = 2 ** z
+        return (int((mx + EARTH_CIRC) / (2 * EARTH_CIRC) * n),
+                int((EARTH_CIRC - my) / (2 * EARTH_CIRC) * n))
+
+    def tile_bounds(tx, ty, z):
+        n  = 2 ** z
+        x0 = tx / n * 2 * EARTH_CIRC - EARTH_CIRC
+        y1 = EARTH_CIRC - ty / n * 2 * EARTH_CIRC
+        x1 = (tx + 1) / n * 2 * EARTH_CIRC - EARTH_CIRC
+        y0 = EARTH_CIRC - (ty + 1) / n * 2 * EARTH_CIRC
+        return x0, y0, x1, y1   # xmin ymin xmax ymax
+
+    def lonlat_to_merc(lon, lat):
+        mx = math.radians(lon) * EARTH_R
+        my = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * EARTH_R
+        return mx, my
+
+    # LUT statut → RGBA (vectorise la colorisation : lut[codes] en un coup).
+    # Semi-transparence BAKÉE (SHADOW_COLOR_MAP) — l'utilisateur laisse l'opacité
+    # du calque à 100 % côté app, sinon Locus recompose les tuiles et fait
+    # réapparaître les coutures (cf. note de SHADOW_COLOR_MAP).
+    # nodata (code 255) → (0,0,0,0) : hors emprise totalement transparent.
+    lut = np.zeros((256, 4), dtype=np.uint8)
+    for code, rgba in SHADOW_COLOR_MAP.items():
+        lut[code] = rgba
+
+    try:
+        with rasterio.open(tif_path) as src:
+            transformer_wgs84 = TransformerPool.lambert_to_wgs84()
+            b = src.bounds
+            west,  south = transformer_wgs84.transform(b.left,  b.bottom)
+            east,  north = transformer_wgs84.transform(b.right, b.top)
+            lat_c = (south + north) / 2.0
+            lon_c = (west + east) / 2.0
+            xmin_merc, ymin_merc = lonlat_to_merc(west, south)
+            xmax_merc, ymax_merc = lonlat_to_merc(east, north)
+
+            # Zoom auto : caler la résolution native des tuiles sur celle du
+            # raster source. CEIL (pas round) : on veut une résolution de tuile
+            # au moins aussi fine que la source — round() pouvait choisir un
+            # niveau plus GROSSIER (ex. 6,9 m/px à z14 alors que la source est
+            # à 5 m), d'où une carte d'ombre moins précise que le KMZ natif.
+            # En Mercator la résolution sol = res_equateur·cos(lat).
+            src_res_m = abs(src.transform.a)  # m/px en Lambert93 ≈ m sol
+            if zoom_max is None:
+                merc_res_eq = 2 * EARTH_CIRC / TILE_SIZE  # res à z0 (équateur)
+                z_native = math.log2(merc_res_eq * math.cos(math.radians(lat_c))
+                                     / max(src_res_m, 1e-6))
+                zoom_max = int(min(19, max(10, math.ceil(z_native))))
+            if zoom_min is None:
+                zoom_min = max(8, zoom_max - 4)
+
+            if os.path.exists(mbtiles_path):
+                os.remove(mbtiles_path)
+            con = sqlite3.connect(mbtiles_path)
+            cur = con.cursor()
+            cur.executescript("""
+                CREATE TABLE metadata (name TEXT, value TEXT);
+                CREATE TABLE tiles   (zoom_level INTEGER, tile_column INTEGER,
+                                      tile_row   INTEGER, tile_data   BLOB);
+                CREATE UNIQUE INDEX idx_tiles ON tiles (zoom_level, tile_column, tile_row);
+            """)
+            bounds = f"{west:.6f},{south:.6f},{east:.6f},{north:.6f}"
+            for k, v in [("name", os.path.splitext(os.path.basename(mbtiles_path))[0]),
+                         ("type", "overlay"), ("version", "1.0"),
+                         ("description", "Carte d'ombre portée solaire (gpxsolar)"),
+                         ("format", "png"),
+                         ("minzoom", str(zoom_min)), ("maxzoom", str(zoom_max)),
+                         ("bounds", bounds),
+                         ("center", f"{lon_c:.6f},{lat_c:.6f},{zoom_max}")]:
+                cur.execute("INSERT INTO metadata VALUES (?,?)", (k, v))
+
+            batch, BATCH = [], 500
+            total = 0
+
+            # Tuilage ALIGNÉ sur la grille de tuiles, niveau par niveau.
+            # Pour chaque zoom : reprojection Lambert93 → Web Mercator sur une
+            # grille dont l'origine est le coin d'une tuile et la résolution
+            # exactement celle du niveau. Chaque tuile devient alors un slice
+            # EXACT de 256 px (aucun arrondi par tuile) → pas de couture, et la
+            # source est échantillonnée à la résolution propre de chaque zoom
+            # (pas de pyramide de moyennage). C'est ce que fait gdal2tiles.
+            # Coût : une reprojection par zoom, mais les cartes sont locales
+            # (quelques milliers de px) → négligeable.
+            for z in range(zoom_min, zoom_max + 1):
+                res_z = 2 * EARTH_CIRC / (TILE_SIZE * 2 ** z)
+                tx0, ty0 = merc_to_tile(xmin_merc, ymax_merc, z)  # coin haut-gauche
+                tx1, ty1 = merc_to_tile(xmax_merc, ymin_merc, z)  # coin bas-droite
+                gx0, _, _, gy1 = tile_bounds(tx0, ty0, z)         # origine grille alignée
+                grid_w = (tx1 - tx0 + 1) * TILE_SIZE
+                grid_h = (ty1 - ty0 + 1) * TILE_SIZE
+                grid_transform = from_origin(gx0, gy1, res_z, res_z)
+                grid = np.full((grid_h, grid_w), 255, dtype=np.uint8)
+                reproject(
+                    source        = rasterio.band(src, 1),
+                    destination   = grid,
+                    src_transform = src.transform, src_crs = src.crs,
+                    src_nodata    = 255,
+                    dst_transform = grid_transform, dst_crs = "EPSG:3857",
+                    dst_nodata    = 255,
+                    resampling    = Resampling.nearest,
+                    num_threads   = 0)
+
+                for ty in range(ty0, ty1 + 1):
+                    ry = (ty - ty0) * TILE_SIZE
+                    for tx in range(tx0, tx1 + 1):
+                        rx = (tx - tx0) * TILE_SIZE
+                        codes = grid[ry:ry + TILE_SIZE, rx:rx + TILE_SIZE]
+                        if not (codes != 255).any():
+                            continue   # tuile entièrement nodata → transparente → rien à écrire
+                        rgba = lut[codes]   # (256, 256, 4)
+                        buf = io.BytesIO()
+                        Image.fromarray(rgba, "RGBA").save(
+                            buf, "PNG", optimize=False, compress_level=6)
+                        y_tms = (2 ** z - 1) - ty   # MBTiles = schéma TMS (Y inversé vs XYZ)
+                        batch.append((z, tx, y_tms, buf.getvalue()))
+                        total += 1
+                    if len(batch) >= BATCH:
+                        cur.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", batch)
+                        con.commit(); batch.clear()
+            if batch:
+                cur.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", batch)
+                con.commit()
+            con.close()
+        log_func(f"DEBUG: MBTiles overlay créé: {mbtiles_path} "
+                 f"(z{zoom_min}-{zoom_max}, {total} tuiles)")
+        return mbtiles_path
+    except Exception as e:
+        log_func(f"ERREUR: Impossible de créer le MBTiles: {e}")
+        traceback.print_exc()
+        return None
+
 
 def make_ray_styles():
     def style(color, width=2):
@@ -4280,20 +4469,49 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                     data, hgt_manager, shadow_mode, float(analysis_resolution), shadow_map_tif_path, progress_callback, num_workers=num_workers
                 )
 
+                # Trace colorée exportée AUSSI en KML autonome (= un "track" Locus).
+                # Dans Locus Map / OsmAnd un track GPX/KML coexiste avec un
+                # overlay-carte (le .mbtiles d'ombre) : ce sont deux couches
+                # distinctes, le track ne compte PAS dans la limite d'un seul
+                # overlay. On contourne ainsi le « je ne peux superposer qu'une
+                # carte ». Sauvé AVANT la fusion KMZ ci-dessous, qui ajoute le
+                # GroundOverlay à l'objet (sinon la trace standalone l'inclurait).
+                # La trace reste vectorielle (nette, cliquable) — pas rasterisée.
+                if trace_kml_obj is not None:
+                    trace_kml_path = os.path.join(
+                        SHADOW_GPX_DIR, f"{shadow_map_name_base}_trace.kml")
+                    try:
+                        trace_kml_obj.save(trace_kml_path)
+                        log_func(f"DEBUG: Trace KML autonome (track Locus/OsmAnd): {trace_kml_path}")
+                    except Exception as e_tr:
+                        log_func(f"AVERTISSEMENT: export trace KML ignoré: {e_tr}")
+
                 # Chemin pour le KMZ final
                 kmz_output_path = os.path.join(SHADOW_GPX_DIR, f"{shadow_map_name_base}.kmz")
-                
+
                 # Générer le KMZ en fusionnant la trace et la carte d'ombre (qui inclut maintenant la grille si générée)
                 final_output_path = geotiff_to_kml_groundoverlay(
-                    shadow_map_tif_path, 
-                    kmz_output_path, 
-                    log_func, 
-                    existing_kml_obj=trace_kml_obj, 
+                    shadow_map_tif_path,
+                    kmz_output_path,
+                    log_func,
+                    existing_kml_obj=trace_kml_obj,
                     progress_callback=progress_callback
                 )
-                
+
                 out_name = os.path.basename(final_output_path) if final_output_path else None
                 if first_output_path is None: first_output_path = final_output_path
+
+                # Export MBTiles overlay (calque transparent pour Locus Map /
+                # OsmAnd / OruxMaps…). Non bloquant : un échec ne doit pas
+                # compromettre le KMZ déjà produit.
+                try:
+                    mbtiles_output_path = os.path.join(
+                        SHADOW_GPX_DIR, f"{shadow_map_name_base}.mbtiles")
+                    geotiff_to_mbtiles_overlay(
+                        shadow_map_tif_path, mbtiles_output_path, log_func,
+                        progress_callback=progress_callback)
+                except Exception as e_mbt:
+                    log_func(f"AVERTISSEMENT: export MBTiles ignoré: {e_mbt}")
 
 
             else:

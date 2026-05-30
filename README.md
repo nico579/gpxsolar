@@ -1,6 +1,6 @@
 # gpxsolar
 
-**Analyse d'ensoleillement d'une randonnée GPX — ombres de relief (MNT/MNH) et de végétation — sortie KML/KMZ pour Google Earth + CSV.**
+**Analyse d'ensoleillement d'une randonnée GPX — ombres de relief (MNT/MNH) et de végétation — sorties KMZ (Google Earth), MBTiles + KML (Locus Map / OsmAnd) et CSV.**
 
 Script Python autonome qui prend une trace GPX, une date et une heure de départ,
 puis calcule pour chaque point du parcours s'il est au soleil ou à l'ombre, en
@@ -30,8 +30,11 @@ un récapitulatif CSV.
   - **IGN LiDAR HD 0.5 m** — France, très haute résolution (MNT, MNS, MNH)
 - **Ombres de végétation** via ESA WorldCover (hauteur de canopée estimée),
   désactivables.
-- **Sorties** : KML/KMZ colorisé (Google Earth) + CSV agrégé. Option de points de
-  passage horodatés tout au long du parcours.
+- **Sorties** : KMZ colorisé (Google Earth), overlay **MBTiles** + trace **KML**
+  pour les apps GPS smartphone (Locus Map, OsmAnd…), et CSV agrégé. Option de
+  points de passage horodatés tout au long du parcours.
+  Détail des fichiers et superposition smartphone : section
+  [Fichiers de sortie](#fichiers-de-sortie--superposition-smartphone).
 
 ---
 
@@ -176,7 +179,8 @@ Puis dans la fenêtre :
 ### Mode ligne de commande (headless)
 
 Dès qu'on passe un argument, gpxsolar calcule **sans ouvrir de fenêtre** et écrit
-les sorties (KML/KMZ dans `GPX_Ombres/`, plus le CSV). Le minimum requis est
+les sorties dans `GPX_Ombres/` (KMZ / MBTiles / KML selon les options — voir
+[Fichiers de sortie](#fichiers-de-sortie--superposition-smartphone)), plus le CSV. Le minimum requis est
 `--gpx` + `--date` (JJ/MM/AAAA) + `--time` (HH:MM). Tout ce qui suit vaut pour le
 binaire comme pour le script — remplacez simplement `gpxsolar.exe` par
 `./gpxsolar` (Linux) ou `python gpxsolar.py` (dev).
@@ -199,6 +203,74 @@ gpxsolar.exe --gpx rando.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lid
 
 > Le backtick `` ` `` est la continuation de ligne PowerShell. Sous Linux/macOS,
 > utilisez `\` ou mettez tout sur une seule ligne.
+
+---
+
+## Fichiers de sortie & superposition smartphone
+
+Toutes les sorties atterrissent dans `GPX_Ombres/`. Le préfixe `<base>` encode
+le GPX, la date, l'heure, la source d'altitude, le type d'ombre et le sens.
+
+**Sans `--generate-shadow-map`** (tracé seul) :
+
+| Fichier | Contenu | Pour |
+|---|---|---|
+| `<base>.kml` | trace colorée soleil/ombre (vectorielle) | Google Earth, Locus, OsmAnd, QGIS |
+
+**Avec `--generate-shadow-map`** (tracé + carte d'ombre) — trois fichiers, un par usage :
+
+| Fichier | Contenu | Pour |
+|---|---|---|
+| `<base>.kmz` | **tout-en-un** : trace colorée **+** carte d'ombre | **Google Earth** (desktop) |
+| `<base>.mbtiles` | carte d'ombre seule, **overlay raster** (tuiles PNG, Web Mercator) | **Locus Map / OsmAnd / OruxMaps / QGIS** |
+| `<base>_trace.kml` | trace colorée seule (vectorielle) | **Locus Map / OsmAnd** (comme *track*) |
+
+Plus le **CSV** récapitulatif (`analyse_solaire.csv` par défaut), une ligne par run.
+
+### Pourquoi trois fichiers et pas un seul
+
+Google Earth lit le **KMZ** (image d'ombre + trace fusionnées) sans souci. Mais
+les apps smartphone gèrent mal le GroundOverlay KML : on leur fournit donc la
+carte d'ombre au format **MBTiles** (le standard d'overlay raster qu'elles
+savent toutes afficher) et la trace en **KML** séparé.
+
+### Superposer ombre + trace sur smartphone (Locus Map, OsmAnd)
+
+Le réflexe « je ne peux activer qu'**un** overlay-carte » est exact — mais une
+app GPS a **trois couches indépendantes** :
+
+1. le **fond de carte** (topo, satellite…) ;
+2. **un** overlay-carte par-dessus → c'est le **`.mbtiles`** d'ombre ;
+3. autant de **tracks/itinéraires** qu'on veut → c'est le **`_trace.kml`**.
+
+Un *track* n'est **pas** une « carte » : il ne compte pas dans la limite d'un
+seul overlay. On charge donc l'ombre **et** la trace comme **deux couches de
+nature différente**, et elles s'affichent ensemble.
+
+**Locus Map :**
+- *Ombre* : copier `<base>.mbtiles` dans `Locus/mapItems/` (ou `Locus/maps/`),
+  puis l'activer comme **overlay** (gestionnaire de cartes → bouton overlay).
+  **Laisser l'opacité du calque à 100 %** (voir l'encadré ci-dessous).
+- *Trace* : **importer** `<base>_trace.kml` → elle apparaît comme **track**,
+  nette et cliquable, par-dessus l'overlay.
+
+**OsmAnd :**
+- *Ombre* : *Configurer la carte → Couche de carte en superposition* → choisir
+  le `.mbtiles`. **Laisser la transparence du calque au maximum / à 0 %.**
+- *Trace* : *Mes données / Pistes* → **importer** le `.kml` (ou `.gpx`).
+
+> **Laisse l'opacité du calque à 100 % dans Locus/OsmAnd.** La semi-transparence
+> est déjà **bakée dans les tuiles** (l'ombre laisse voir le fond topo) — rien à
+> régler. Baisser l'opacité **du calque** ne fait qu'accentuer un artefact de
+> Locus.
+>
+> **Coutures de tuiles fines dans Locus :** Locus dessine les tuiles d'un overlay
+> semi-transparent avec un léger recouvrement, ce qui laisse de **fines lignes**
+> aux bords de tuiles. C'est une **limite de rendu de Locus** (indépendante du
+> format : MBTiles, RMAP ou SQLitedb donnent la même chose), pas un défaut des
+> données — les tuiles sont contiguës au pixel près. **QGIS et Google Earth
+> rendent sans couture.** Pour le SIG, préfère de toute façon le GeoTIFF
+> (EPSG:2154) ou le MBTiles ouvert dans QGIS.
 
 Principales options (liste complète : `gpxsolar.exe --help`) :
 
