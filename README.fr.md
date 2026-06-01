@@ -316,7 +316,7 @@ Principales options (liste complète : `gpxsolar.exe --help`) :
 La même randonnée à 9h, 13h et 18h (vue satellite 3D, Google Earth) : l'ombre
 portée balaie le versant à mesure que le soleil tourne.
 
-![La même randonnée à 9h, 13h et 18h : l'ombre portée se déplace sur le versant](screenshots/georezo_montage.jpg)
+![La même randonnée à 9h, 13h et 18h : l'ombre portée se déplace sur le versant](screenshots/track_3times.jpg)
 
 ### Interface graphique
 

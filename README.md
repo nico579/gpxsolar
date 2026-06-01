@@ -314,7 +314,7 @@ Main options (full list: `gpxsolar.exe --help`):
 The same hike at 9:00, 13:00 and 18:00 (3D satellite view, Google Earth): the cast
 shadow sweeps across the hillside as the sun moves.
 
-![The same hike at 9:00, 13:00 and 18:00: the cast shadow moves across the hillside](screenshots/georezo_montage.jpg)
+![The same hike at 9:00, 13:00 and 18:00: the cast shadow moves across the hillside](screenshots/track_3times.jpg)
 
 ### Graphical interface
 
