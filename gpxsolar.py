@@ -1114,6 +1114,7 @@ OBSERVER_EYE_HEIGHT = 1.7
 SHADOW_GPX_DIR = 'GPX_Ombres'
 CONFIG_FILE = 'gpx_analyzer_config.json'
 HISTORY_FILE = 'gpx_analyzer_history.json'
+PREFS_FILE = 'gpx_analyzer_prefs.json'   # préférences UI (langue) — cf. load_lang/save_lang
 HISTORY_MAX_ENTRIES = 30
 # Workers de la carte d'ombre : adaptatif au lieu d'un 4 codé en dur. Le gain
 # threads plafonne car pysolar (Python pur) ne relâche pas le GIL et numba
@@ -1311,6 +1312,35 @@ def clear_history() -> bool:
         return True
     except OSError as e:
         logging.warning(f"Suppression historique impossible : {e}")
+        return False
+
+
+# Préférences UI persistées (langue). Override manuel du toggle FR/EN ; absente
+# = auto-détection par navigator.language côté JS. Pas en localStorage : sous
+# QtWebEngine packagé il peut être éphémère ; un desktop range ses prefs en fichier.
+def load_lang():
+    """Retourne 'fr'/'en' si une préférence est sauvée, sinon None (= auto-détection JS)."""
+    try:
+        if os.path.exists(PREFS_FILE):
+            with open(PREFS_FILE, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            v = d.get("lang") if isinstance(d, dict) else None
+            return v if v in ("fr", "en") else None
+    except (OSError, ValueError) as e:
+        logging.warning(f"Lecture préférences impossible : {e}")
+    return None
+
+
+def save_lang(code: str) -> bool:
+    """Persiste le choix de langue de l'UI. 'fr' ou 'en' ; sinon ignoré."""
+    if code not in ("fr", "en"):
+        return False
+    try:
+        with open(PREFS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({"lang": code}, f, indent=2)
+        return True
+    except OSError as e:
+        logging.warning(f"Sauvegarde préférences impossible : {e}")
         return False
 
 
@@ -4616,23 +4646,25 @@ def show_form(args, tz_finder, output_default, help_text):
         for k, info in HGTDataManager.SOURCES.items()
     ]
 
+    # 'i18n' = clé de traduction côté GUI (cf. dico I18N JS). buildLegend pose un
+    # data-i18n sur le label → re-traduit automatiquement au toggle FR/EN.
     KML_LEGEND = [
-        {'name': 'Soleil',       'color': '#FFFF00', 'description': 'Ensoleillé'},
-        {'name': 'Ombre Relief', 'color': '#A0A0A0', 'description': 'Terrain/Montagne'},
-        {'name': 'Ombre Vég.',   'color': '#009900', 'description': 'Végétation haute'},
-        {'name': 'Ombre R+V',    'color': '#A52A15', 'description': 'Relief + Vég.'},
+        {'name': 'Soleil',       'color': '#FFFF00', 'description': 'Ensoleillé',        'i18n': 'leg.sun'},
+        {'name': 'Ombre Relief', 'color': '#A0A0A0', 'description': 'Terrain/Montagne',  'i18n': 'leg.shaderelief'},
+        {'name': 'Ombre Vég.',   'color': '#009900', 'description': 'Végétation haute',  'i18n': 'leg.shadeveg'},
+        {'name': 'Ombre R+V',    'color': '#A52A15', 'description': 'Relief + Vég.',     'i18n': 'leg.shaderv'},
     ]
     SLOPE_LEGEND = [
-        {'name': '0-5%',   'color': '#00FF00', 'description': 'Plat ou quasi-plat'},
-        {'name': '5-10%',  'color': '#FFFF00', 'description': 'Pente faible'},
-        {'name': '10-20%', 'color': '#FF8000', 'description': 'Pente moyenne'},
-        {'name': '20-30%', 'color': '#FF0000', 'description': 'Pente forte'},
-        {'name': '> 30%',  'color': '#8B0000', 'description': 'Pente très forte'},
+        {'name': '0-5%',   'color': '#00FF00', 'description': 'Plat ou quasi-plat', 'i18n': 'leg.s05'},
+        {'name': '5-10%',  'color': '#FFFF00', 'description': 'Pente faible',       'i18n': 'leg.s510'},
+        {'name': '10-20%', 'color': '#FF8000', 'description': 'Pente moyenne',      'i18n': 'leg.s1020'},
+        {'name': '20-30%', 'color': '#FF0000', 'description': 'Pente forte',        'i18n': 'leg.s2030'},
+        {'name': '> 30%',  'color': '#8B0000', 'description': 'Pente très forte',   'i18n': 'leg.s30'},
     ]
     TILE_LEGEND = [
-        {'name': 'Vert',  'color': '#00FF00', 'description': 'Tuile utilisée (ray-tracing)'},
-        {'name': 'Bleu',  'color': '#0000FF', 'description': 'Tuile en RAM (cache LRU)'},
-        {'name': 'Jaune', 'color': '#FFFF00', 'description': 'Tuile sur disque (pas en RAM)'},
+        {'name': 'Vert',  'color': '#00FF00', 'description': 'Tuile utilisée (ray-tracing)', 'i18n': 'leg.tgreen'},
+        {'name': 'Bleu',  'color': '#0000FF', 'description': 'Tuile en RAM (cache LRU)',     'i18n': 'leg.tblue'},
+        {'name': 'Jaune', 'color': '#FFFF00', 'description': 'Tuile sur disque (pas en RAM)','i18n': 'leg.tyellow'},
     ]
 
     INIT_DEFAULTS = {
@@ -4678,6 +4710,10 @@ def show_form(args, tz_finder, output_default, help_text):
         def clear_historique(self):
             ok = clear_history()
             return {"ok": ok}
+
+        def set_lang(self, code):
+            """Persiste l'override manuel de langue de l'UI (toggle FR/EN)."""
+            return {"ok": save_lang(code)}
 
         def pick_gpx(self):
             w = self._get_window()
@@ -4839,6 +4875,7 @@ def show_form(args, tz_finder, output_default, help_text):
         "help_text": help_text,
         "version": APP_VERSION,
         "historique": load_history(),
+        "lang": load_lang(),   # None = auto-détection JS (navigator.language)
     }
     init_json = json.dumps(init_data, ensure_ascii=False).replace("</", "<\\/")
     HTML = _build_gpxsolar_html().replace(
@@ -5055,35 +5092,43 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
   max-height:80vh;overflow-y:auto}
 #help-modal .inner h3{margin-bottom:10px;color:var(--ac)}
 #help-modal .close{margin-top:12px;display:flex;justify-content:flex-end}
+.btn-lang{background:var(--bg3);color:var(--dim);border:none;padding:3px 9px;
+  font:11px var(--fnt);font-weight:600;cursor:pointer}
+.btn-lang.active{background:var(--ac);color:#fff}
 </style>
 </head>
 <body>
 
 <div id="main">
 <div id="btn-bar">
-  <button class="btn btn-run" id="btn-run" onclick="lancer()">▶ Lancer le calcul</button>
-  <button class="btn btn-stop" id="btn-stop" onclick="arreter()" disabled>■ Arrêter</button>
-  <button class="btn btn-help" onclick="afficherAide()">? Aide</button>
-  <button class="btn-toggle" id="btn-hist" onclick="toggleHistorique()" style="margin-left:12px">⏱ Historique</button>
+  <button class="btn btn-run" id="btn-run" onclick="lancer()" data-i18n="btn.run">▶ Lancer le calcul</button>
+  <button class="btn btn-stop" id="btn-stop" onclick="arreter()" disabled data-i18n="btn.stop">■ Arrêter</button>
+  <button class="btn btn-help" onclick="afficherAide()" data-i18n="btn.help">? Aide</button>
+  <button class="btn-toggle" id="btn-hist" onclick="toggleHistorique()" data-i18n="btn.hist" style="margin-left:12px">⏱ Historique</button>
   <button class="btn-toggle" id="btn-log"  onclick="toggleLogPanel()">📋 Logs</button>
   <span id="footer-status" style="font-size:11px;color:var(--dim);margin-left:8px"></span>
+  <span style="margin-left:auto;display:flex;border:1px solid var(--bd);border-radius:4px;overflow:hidden"
+        title="Langue / Language">
+   <button class="btn-lang" data-lang-btn="fr" onclick="setLang('fr', true)">FR</button>
+   <button class="btn-lang" data-lang-btn="en" onclick="setLang('en', true)">EN</button>
+  </span>
 </div>
 
 <div id="form-inner">
 
   <!-- Fichier / Date / Heure -->
   <div class="section sec-file">
-   <div class="section-hd">Fichier GPX &amp; date</div>
+   <div class="section-hd" data-i18n="sec.file">Fichier GPX &amp; date</div>
    <div class="section-body">
     <div class="row">
-      <label class="lbl">Fichier GPX</label>
+      <label class="lbl" data-i18n="f.gpx">Fichier GPX</label>
       <input type="text" id="f-gpx" placeholder="…/parcours.gpx" style="flex:1">
       <button class="btn btn-sm" onclick="pickGpx()">…</button>
     </div>
     <div class="row">
-      <label class="lbl">Date de départ</label>
+      <label class="lbl" data-i18n="f.date">Date de départ</label>
       <input type="date" id="f-date" class="inp-mid">
-      <label class="lbl tiny" style="margin-left:14px">Heure</label>
+      <label class="lbl tiny" style="margin-left:14px" data-i18n="f.time">Heure</label>
       <select id="f-time" class="inp-mid"></select>
     </div>
    </div>
@@ -5091,7 +5136,7 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 
   <!-- DEM source -->
   <div class="section sec-dem">
-   <div class="section-hd">Modèle de données d'altitude (DEM)</div>
+   <div class="section-hd" data-i18n="sec.dem">Modèle de données d'altitude (DEM)</div>
    <div class="section-body">
     <div class="row" id="dem-radios"></div>
    </div>
@@ -5099,27 +5144,27 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 
   <!-- Options de simulation (numériques) -->
   <div class="section sec-params">
-   <div class="section-hd">Options de simulation</div>
+   <div class="section-hd" data-i18n="sec.params">Options de simulation</div>
    <div class="section-body">
     <div class="row">
-      <label class="lbl">Résolution analyse (m)</label>
+      <label class="lbl" data-i18n="f.res">Résolution analyse (m)</label>
       <input type="number" id="f-analysis-resolution" step="0.5" min="0.5" class="inp-short">
-      <label class="lbl short" style="margin-left:14px">Distance max. ombre (m)</label>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.maxdist">Distance max. ombre (m)</label>
       <input type="number" id="f-max-distance" step="100" min="100" class="inp-short">
-      <label class="lbl short" style="margin-left:14px">Marge bbox (m)</label>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.margin">Marge bbox (m)</label>
       <input type="number" id="f-margin-meters" step="100" min="0" class="inp-short">
     </div>
     <div class="row">
-      <label class="lbl">Taille des lots (batch)</label>
+      <label class="lbl" data-i18n="f.batch">Taille des lots (batch)</label>
       <input type="number" id="f-batch-size" step="1" min="1" class="inp-short">
-      <label class="lbl short" style="margin-left:14px">Workers (parallèle)</label>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.workers">Workers (parallèle)</label>
       <input type="number" id="f-num-workers" step="1" min="1" max="32" class="inp-short">
-      <label class="lbl short" style="margin-left:14px">Intervalle pts (min)</label>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.ptint">Intervalle pts (min)</label>
       <input type="number" id="f-passage-interval" step="1" min="0" class="inp-short">
-      <span class="hint">0 = aucun</span>
+      <span class="hint" data-i18n="hint.none">0 = aucun</span>
     </div>
     <div class="row">
-      <label class="lbl">Pas solaire (s) — cache</label>
+      <label class="lbl" data-i18n="f.solarstep">Pas solaire (s) — cache</label>
       <select id="f-solar-step" class="inp-short">
         <option value="10">10</option>
         <option value="30">30</option>
@@ -5127,7 +5172,7 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
         <option value="120">120</option>
         <option value="300">300</option>
       </select>
-      <span class="hint">Ex : 60 (rapide), 10 (précis)</span>
+      <span class="hint" data-i18n="hint.solarstep">Ex : 60 (rapide), 10 (précis)</span>
     </div>
    </div>
   </div>
@@ -5137,24 +5182,24 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
    <div class="section-hd">Modes</div>
    <div class="section-body">
     <div class="row">
-      <label class="lbl">Calcul d'ombre</label>
+      <label class="lbl" data-i18n="f.shadowcalc">Calcul d'ombre</label>
       <div class="seg">
-        <input type="radio" name="shadow" id="sh-relief" value="relief"><label for="sh-relief">Relief seul</label>
-        <input type="radio" name="shadow" id="sh-veg"    value="vegetation"><label for="sh-veg">Végétation seule</label>
-        <input type="radio" name="shadow" id="sh-both"   value="both"><label for="sh-both">Les deux</label>
+        <input type="radio" name="shadow" id="sh-relief" value="relief"><label for="sh-relief" data-i18n="sh.relief">Relief seul</label>
+        <input type="radio" name="shadow" id="sh-veg"    value="vegetation"><label for="sh-veg" data-i18n="sh.veg">Végétation seule</label>
+        <input type="radio" name="shadow" id="sh-both"   value="both"><label for="sh-both" data-i18n="both">Les deux</label>
       </div>
-      <label class="lbl short" style="margin-left:14px">Sens du parcours</label>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.dir">Sens du parcours</label>
       <div class="seg">
-        <input type="radio" name="direction" id="di-cw"   value="CW"><label for="di-cw">Horaire</label>
-        <input type="radio" name="direction" id="di-ccw"  value="CCW"><label for="di-ccw">Anti-horaire</label>
-        <input type="radio" name="direction" id="di-both" value="both"><label for="di-both">Les deux</label>
+        <input type="radio" name="direction" id="di-cw"   value="CW"><label for="di-cw" data-i18n="di.cw">Horaire</label>
+        <input type="radio" name="direction" id="di-ccw"  value="CCW"><label for="di-ccw" data-i18n="di.ccw">Anti-horaire</label>
+        <input type="radio" name="direction" id="di-both" value="both"><label for="di-both" data-i18n="both">Les deux</label>
       </div>
     </div>
     <div class="row">
-      <label class="lbl">Type d'analyse KML</label>
+      <label class="lbl" data-i18n="f.kmltype">Type d'analyse KML</label>
       <div class="seg">
-        <input type="radio" name="analysis" id="an-ombre" value="ombre_soleil"><label for="an-ombre">Ombre / Soleil</label>
-        <input type="radio" name="analysis" id="an-pente" value="pente"><label for="an-pente">Pente (depuis MNT)</label>
+        <input type="radio" name="analysis" id="an-ombre" value="ombre_soleil"><label for="an-ombre" data-i18n="an.ombre">Ombre / Soleil</label>
+        <input type="radio" name="analysis" id="an-pente" value="pente"><label for="an-pente" data-i18n="an.pente">Pente (depuis MNT)</label>
       </div>
     </div>
    </div>
@@ -5162,16 +5207,16 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 
   <!-- Sorties / options annexes -->
   <div class="section sec-out">
-   <div class="section-hd">Sorties &amp; visualisations</div>
+   <div class="section-hd" data-i18n="sec.out">Sorties &amp; visualisations</div>
    <div class="section-body">
     <div class="cb-group">
-      <label><input type="checkbox" id="f-open-gpx"> Ouvrir le KML résultat après calcul</label>
-      <label><input type="checkbox" id="f-visualize-tiles"> Visualiser les tuiles (KML)</label>
-      <label><input type="checkbox" id="f-generate-shadow-map"> Générer carte d'ombre (GeoTIFF)</label>
+      <label><input type="checkbox" id="f-open-gpx"> <span data-i18n="out.openkml">Ouvrir le KML résultat après calcul</span></label>
+      <label><input type="checkbox" id="f-visualize-tiles"> <span data-i18n="out.tiles">Visualiser les tuiles (KML)</span></label>
+      <label><input type="checkbox" id="f-generate-shadow-map"> <span data-i18n="out.shadowmap">Générer carte d'ombre (GeoTIFF)</span></label>
     </div>
     <div class="row">
-      <label class="cb"><input type="checkbox" id="f-visualize-sun-rays"> Visualiser rayons solaires (KML)</label>
-      <label class="lbl tiny" style="margin-left:14px">Intervalle rayons</label>
+      <label class="cb"><input type="checkbox" id="f-visualize-sun-rays"> <span data-i18n="out.sunrays">Visualiser rayons solaires (KML)</span></label>
+      <label class="lbl tiny" style="margin-left:14px" data-i18n="f.rayint">Intervalle rayons</label>
       <input type="number" id="f-sun-ray-interval" step="1" min="1" class="inp-short">
     </div>
    </div>
@@ -5179,19 +5224,19 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 
   <!-- Légendes -->
   <div class="section sec-legend">
-   <div class="section-hd">Légendes</div>
+   <div class="section-hd" data-i18n="sec.legend">Légendes</div>
    <div class="section-body">
     <div class="legends-row">
       <div class="legend-card" id="legend-kml">
-        <h4>Couleurs KML — Ombre/Soleil</h4>
+        <h4 data-i18n="leg.kml">Couleurs KML — Ombre/Soleil</h4>
         <div class="legend-items"></div>
       </div>
       <div class="legend-card hidden" id="legend-slope">
-        <h4>Couleurs KML — Pentes (abs)</h4>
+        <h4 data-i18n="leg.slope">Couleurs KML — Pentes (abs)</h4>
         <div class="legend-items"></div>
       </div>
       <div class="legend-card hidden" id="legend-tile">
-        <h4>Tuiles (visualisation)</h4>
+        <h4 data-i18n="leg.tile">Tuiles (visualisation)</h4>
         <div class="legend-items"></div>
       </div>
     </div>
@@ -5204,9 +5249,9 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 <!-- Panneau historique (latéral droit, caché par défaut) -->
 <div id="panneau-hist" class="hidden">
   <div class="hist-header">
-    <strong>⏱ Historique des calculs</strong>
+    <strong data-i18n="hist.title">⏱ Historique des calculs</strong>
     <div style="display:flex;gap:6px;align-items:center">
-      <button class="btn-sm" onclick="viderHistorique()"
+      <button class="btn-sm" onclick="viderHistorique()" data-i18n="clear"
               style="background:transparent;border:1px solid var(--red);color:var(--red)">🗑 Vider</button>
       <button class="btn-sm" onclick="toggleHistorique()"
               style="background:transparent;border:none;font-size:16px">✕</button>
@@ -5220,11 +5265,11 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
   <div id="log-resize-handle"></div>
   <div id="log-header">
     <strong>📋 Logs</strong>
-    <span id="log-status" style="color:var(--dim)">Prêt</span>
+    <span id="log-status" style="color:var(--dim)" data-i18n="log.ready">Prêt</span>
     <div class="log-actions">
-      <button onclick="viderLog()">🗑 Vider</button>
-      <button onclick="copierLog()">⎘ Copier</button>
-      <button onclick="toggleLogPanel()" title="Masquer (ré-affichable via le bouton Logs)">✕</button>
+      <button onclick="viderLog()" data-i18n="clear">🗑 Vider</button>
+      <button onclick="copierLog()" data-i18n="log.copy">⎘ Copier</button>
+      <button onclick="toggleLogPanel()" data-i18n-title="log.hidetip" title="Masquer (ré-affichable via le bouton Logs)">✕</button>
     </div>
   </div>
   <div id="log-progress"><div id="log-progress-bar"></div></div>
@@ -5234,9 +5279,9 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 <!-- Modale d'aide -->
 <div id="help-modal" onclick="if(event.target===this)fermerAide()">
   <div class="inner">
-    <h3>Aide — Simu Rando Solaire</h3>
+    <h3 data-i18n="help.title">Aide — Simu Rando Solaire</h3>
     <div id="help-body"></div>
-    <div class="close"><button class="btn btn-sm" onclick="fermerAide()">Fermer</button></div>
+    <div class="close"><button class="btn btn-sm" onclick="fermerAide()" data-i18n="close">Fermer</button></div>
   </div>
 </div>
 
@@ -5245,15 +5290,119 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 let _polling = null;
 let _initialized = false;
 
+// ── i18n ───────────────────────────────────────────────────────────────────────
+// Même mécanisme que lidar2map (jumeau) : dico inline par locale + attribut
+// data-i18n. On ne tague que les chaînes qui DIFFÈRENT entre fr et en ; les
+// tokens identiques (Modes, GeoTIFF, KML, DEM…) restent en dur (fallback fr).
+// Variantes : data-i18n (textContent), -placeholder, -title, -html (innerHTML).
+const I18N = {
+  fr: {
+    "btn.run":"▶ Lancer le calcul", "btn.stop":"■ Arrêter", "btn.help":"? Aide", "btn.hist":"⏱ Historique",
+    "sec.file":"Fichier GPX & date", "sec.dem":"Modèle de données d'altitude (DEM)",
+    "sec.params":"Options de simulation", "sec.out":"Sorties & visualisations", "sec.legend":"Légendes",
+    "f.gpx":"Fichier GPX", "f.date":"Date de départ", "f.time":"Heure",
+    "f.res":"Résolution analyse (m)", "f.maxdist":"Distance max. ombre (m)", "f.margin":"Marge bbox (m)",
+    "f.batch":"Taille des lots (batch)", "f.workers":"Workers (parallèle)", "f.ptint":"Intervalle pts (min)",
+    "hint.none":"0 = aucun", "f.solarstep":"Pas solaire (s) — cache", "hint.solarstep":"Ex : 60 (rapide), 10 (précis)",
+    "f.shadowcalc":"Calcul d'ombre", "sh.relief":"Relief seul", "sh.veg":"Végétation seule", "both":"Les deux",
+    "f.dir":"Sens du parcours", "di.cw":"Horaire", "di.ccw":"Anti-horaire",
+    "f.kmltype":"Type d'analyse KML", "an.ombre":"Ombre / Soleil", "an.pente":"Pente (depuis MNT)",
+    "out.openkml":"Ouvrir le KML résultat après calcul", "out.tiles":"Visualiser les tuiles (KML)",
+    "out.shadowmap":"Générer carte d'ombre (GeoTIFF)", "out.sunrays":"Visualiser rayons solaires (KML)",
+    "f.rayint":"Intervalle rayons",
+    "leg.kml":"Couleurs KML — Ombre/Soleil", "leg.slope":"Couleurs KML — Pentes (abs)", "leg.tile":"Tuiles (visualisation)",
+    // Items de légende (label complet « nom — description »), clé portée par les données Python
+    "leg.sun":"Soleil — Ensoleillé", "leg.shaderelief":"Ombre Relief — Terrain/Montagne",
+    "leg.shadeveg":"Ombre Vég. — Végétation haute", "leg.shaderv":"Ombre R+V — Relief + Vég.",
+    "leg.s05":"0-5% — Plat ou quasi-plat", "leg.s510":"5-10% — Pente faible", "leg.s1020":"10-20% — Pente moyenne",
+    "leg.s2030":"20-30% — Pente forte", "leg.s30":"> 30% — Pente très forte",
+    "leg.tgreen":"Vert — Tuile utilisée (ray-tracing)", "leg.tblue":"Bleu — Tuile en RAM (cache LRU)",
+    "leg.tyellow":"Jaune — Tuile sur disque (pas en RAM)",
+    "hist.title":"⏱ Historique des calculs", "clear":"🗑 Vider",
+    "log.ready":"Prêt", "log.copy":"⎘ Copier", "log.hidetip":"Masquer (ré-affichable via le bouton Logs)",
+    "help.title":"Aide — Simu Rando Solaire", "close":"Fermer",
+    // Dynamiques (JS) — {x} = placeholders pour tf()
+    "initerr":"Erreur init : ", "log.init1":"Interface graphique initialisée.\n", "log.init2":"Prêt à lancer une simulation.\n",
+    "hist.empty":"Aucun calcul enregistré.", "hist.recalled":"Paramètres rappelés depuis l'historique ({date})",
+    "hist.alreadyempty":"L'historique est déjà vide.", "hist.confirm":"Supprimer {n} entrée(s) de l'historique ?",
+    "hist.cleared":"✓ Historique vidé", "del.error":"Erreur lors de la suppression.", "err.generic":"Erreur : ",
+    "done":"✓ Terminé", "err.code":"✗ Erreur (code {c})",
+    "fail.detail":"Le traitement a échoué (code {c}).\n\n{msg}\n\nVoir le panneau de log pour les détails.",
+    "req.gpx":"Veuillez sélectionner un fichier GPX.", "req.date":"Veuillez sélectionner une date.",
+    "req.time":"Veuillez sélectionner une heure.", "req.dem":"Veuillez sélectionner un modèle d'altitude.",
+    "running":"En cours…", "launcherr":"Erreur de lancement : ", "stopped":"⚠ Arrêté",
+  },
+  en: {
+    "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.help":"? Help", "btn.hist":"⏱ History",
+    "sec.file":"GPX file & date", "sec.dem":"Elevation model (DEM)",
+    "sec.params":"Simulation options", "sec.out":"Outputs & visualisations", "sec.legend":"Legends",
+    "f.gpx":"GPX file", "f.date":"Start date", "f.time":"Time",
+    "f.res":"Analysis resolution (m)", "f.maxdist":"Max shadow distance (m)", "f.margin":"BBox margin (m)",
+    "f.batch":"Batch size", "f.workers":"Workers (parallel)", "f.ptint":"Point interval (min)",
+    "hint.none":"0 = none", "f.solarstep":"Solar step (s) — cache", "hint.solarstep":"e.g. 60 (fast), 10 (precise)",
+    "f.shadowcalc":"Shadow calculation", "sh.relief":"Relief only", "sh.veg":"Vegetation only", "both":"Both",
+    "f.dir":"Route direction", "di.cw":"Clockwise", "di.ccw":"Counter-clockwise",
+    "f.kmltype":"KML analysis type", "an.ombre":"Shade / Sun", "an.pente":"Slope (from DEM)",
+    "out.openkml":"Open result KML after run", "out.tiles":"Visualise tiles (KML)",
+    "out.shadowmap":"Generate shadow map (GeoTIFF)", "out.sunrays":"Visualise sun rays (KML)",
+    "f.rayint":"Ray interval",
+    "leg.kml":"KML colors — Shade/Sun", "leg.slope":"KML colors — Slope (abs)", "leg.tile":"Tiles (visualisation)",
+    "leg.sun":"Sun — Sunlit", "leg.shaderelief":"Relief shade — Terrain/Mountain",
+    "leg.shadeveg":"Vegetation shade — Tall vegetation", "leg.shaderv":"Relief+Veg shade — Relief + Vegetation",
+    "leg.s05":"0-5% — Flat or near-flat", "leg.s510":"5-10% — Gentle slope", "leg.s1020":"10-20% — Moderate slope",
+    "leg.s2030":"20-30% — Steep slope", "leg.s30":"> 30% — Very steep slope",
+    "leg.tgreen":"Green — Tile used (ray-tracing)", "leg.tblue":"Blue — Tile in RAM (LRU cache)",
+    "leg.tyellow":"Yellow — Tile on disk (not in RAM)",
+    "hist.title":"⏱ Calculation history", "clear":"🗑 Clear",
+    "log.ready":"Ready", "log.copy":"⎘ Copy", "log.hidetip":"Hide (re-show via the Logs button)",
+    "help.title":"Help — Simu Rando Solaire", "close":"Close",
+    "initerr":"Init error: ", "log.init1":"GUI initialised.\n", "log.init2":"Ready to run a simulation.\n",
+    "hist.empty":"No saved run.", "hist.recalled":"Parameters recalled from history ({date})",
+    "hist.alreadyempty":"History is already empty.", "hist.confirm":"Delete {n} history entry(ies)?",
+    "hist.cleared":"✓ History cleared", "del.error":"Error while deleting.", "err.generic":"Error: ",
+    "done":"✓ Done", "err.code":"✗ Error (code {c})",
+    "fail.detail":"Processing failed (code {c}).\n\n{msg}\n\nSee the log panel for details.",
+    "req.gpx":"Please select a GPX file.", "req.date":"Please select a date.",
+    "req.time":"Please select a time.", "req.dem":"Please select an elevation model.",
+    "running":"Running…", "launcherr":"Launch error: ", "stopped":"⚠ Stopped",
+  },
+};
+let _lang = 'fr';
+function t(k){ return (I18N[_lang] && I18N[_lang][k]) || I18N.fr[k] || k; }
+function tf(k, v){ let s = t(k); for (const p in (v||{})) s = s.split('{'+p+'}').join(v[p]); return s; }
+function detectLang(){ return (navigator.language || 'en').toLowerCase().startsWith('fr') ? 'fr' : 'en'; }
+function applyI18n(){
+  document.documentElement.lang = _lang;
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const v = t(el.dataset.i18n); if (v) el.textContent = v; });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const v = t(el.dataset.i18nPlaceholder); if (v) el.placeholder = v; });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    const v = t(el.dataset.i18nTitle); if (v) el.title = v; });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => {
+    const v = t(el.dataset.i18nHtml); if (v) el.innerHTML = v; });  // contenu statique de confiance
+  document.querySelectorAll('[data-lang-btn]').forEach(b =>
+    b.classList.toggle('active', b.dataset.langBtn === _lang));
+}
+function setLang(code, persist){
+  _lang = (code === 'en') ? 'en' : 'fr';
+  applyI18n();
+  if (persist && window.pywebview && pywebview.api && pywebview.api.set_lang) {
+    pywebview.api.set_lang(_lang).catch(e => console.error('set_lang error:', e));
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 // Les données sont déjà injectées dans window.INIT_DATA (rendu synchrone).
 // On attend juste DOMContentLoaded puis on rend tout immédiatement.
 document.addEventListener('DOMContentLoaded', () => {
+  const _saved = (window.INIT_DATA && window.INIT_DATA.lang);
+  setLang((_saved === 'fr' || _saved === 'en') ? _saved : detectLang(), false);
   installerResize();
   try {
     initFromData(window.INIT_DATA || {});
   } catch(e) {
-    document.getElementById('footer-status').textContent = 'Erreur init : ' + e;
+    document.getElementById('footer-status').textContent = t('initerr') + e;
     console.error('init error:', e);
   }
   // Démarrer le polling pour les logs/progress dès qu'un calcul tournera.
@@ -5272,8 +5421,8 @@ function initFromData(d) {
   document.getElementById('help-body').textContent = d.help_text || '';
   loadDefaults(d.defaults || {});
   buildHistorique(d.historique || []);
-  ajouterLigneLog('Interface graphique initialisée.\n', 'dim');
-  ajouterLigneLog('Prêt à lancer une simulation.\n', 'dim');
+  ajouterLigneLog(t('log.init1'), 'dim');
+  ajouterLigneLog(t('log.init2'), 'dim');
 }
 
 function startPollingWhenReady(tries=0) {
@@ -5326,7 +5475,8 @@ function buildLegend(containerId, entries) {
     sw.className = 'legend-swatch';
     sw.style.background = e.color;
     const txt = document.createElement('span');
-    txt.textContent = `${e.name} — ${e.description}`;
+    if (e.i18n) { txt.dataset.i18n = e.i18n; txt.textContent = t(e.i18n); }  // re-traduit au toggle
+    else { txt.textContent = `${e.name} — ${e.description}`; }
     row.appendChild(sw); row.appendChild(txt);
     items.appendChild(row);
   });
@@ -5443,7 +5593,7 @@ function buildHistorique(hist) {
   const list = document.getElementById('hist-list');
   if (!list) return;
   if (!_historique.length) {
-    list.innerHTML = '<div class="hist-empty">Aucun calcul enregistré.</div>';
+    list.innerHTML = '<div class="hist-empty">' + t('hist.empty') + '</div>';
     return;
   }
   list.innerHTML = _historique.map((e, i) => {
@@ -5473,21 +5623,21 @@ function rappelHistorique(i) {
   loadDefaults(e.params);
   toggleHistorique();
   document.getElementById('footer-status').textContent =
-    `Paramètres rappelés depuis l'historique (${e.date || ''})`;
+    tf('hist.recalled', {date: e.date || ''});
 }
 
 async function viderHistorique() {
-  if (!_historique.length) { alert('L\'historique est déjà vide.'); return; }
-  if (!confirm(`Supprimer ${_historique.length} entrée(s) de l'historique ?`)) return;
+  if (!_historique.length) { alert(t('hist.alreadyempty')); return; }
+  if (!confirm(tf('hist.confirm', {n: _historique.length}))) return;
   try {
     const r = await pywebview.api.clear_historique();
     if (r && r.ok) {
       buildHistorique([]);
-      document.getElementById('footer-status').textContent = '✓ Historique vidé';
+      document.getElementById('footer-status').textContent = t('hist.cleared');
     } else {
-      alert('Erreur lors de la suppression.');
+      alert(t('del.error'));
     }
-  } catch(e) { alert('Erreur : ' + e); }
+  } catch(e) { alert(t('err.generic') + e); }
 }
 
 async function rafraichirHistorique() {
@@ -5574,9 +5724,9 @@ async function pollOnce() {
       _running = false;
       const code = r.code;
       document.getElementById('log-status').textContent =
-        code === 0 ? '✓ Terminé' : `✗ Erreur (code ${code})`;
+        code === 0 ? t('done') : tf('err.code', {c: code});
       document.getElementById('footer-status').textContent =
-        code === 0 ? '✓ Terminé' : `✗ Erreur (code ${code})`;
+        code === 0 ? t('done') : tf('err.code', {c: code});
       setLogProgress(100, code === 0 ? 'ok' : 'err');
       if (code === 0) {
         rafraichirHistorique();
@@ -5587,8 +5737,7 @@ async function pollOnce() {
         try {
           const err = await pywebview.api.get_last_error();
           if (err && err.msg) {
-            alert(`Le traitement a échoué (code ${err.retcode}).\n\n${err.msg}\n\n` +
-                  `Voir le panneau de log pour les détails.`);
+            alert(tf('fail.detail', {c: err.retcode, msg: err.msg}));
           }
         } catch(e) { /* silencieux */ }
       }
@@ -5631,17 +5780,17 @@ function setFormLocked(locked) {
 
 async function lancer() {
   const cfg = getConfig();
-  if (!cfg.gpx_file) { alert('Veuillez sélectionner un fichier GPX.'); return; }
-  if (!cfg.date)     { alert('Veuillez sélectionner une date.'); return; }
-  if (!cfg.time)     { alert('Veuillez sélectionner une heure.'); return; }
-  if (!cfg.dem_source) { alert('Veuillez sélectionner un modèle d\'altitude.'); return; }
+  if (!cfg.gpx_file) { alert(t('req.gpx')); return; }
+  if (!cfg.date)     { alert(t('req.date')); return; }
+  if (!cfg.time)     { alert(t('req.time')); return; }
+  if (!cfg.dem_source) { alert(t('req.dem')); return; }
 
   document.getElementById('btn-run').disabled  = true;
   document.getElementById('btn-stop').disabled = false;
   setFormLocked(true);
   _running = true;
-  document.getElementById('log-status').textContent = 'En cours…';
-  document.getElementById('footer-status').textContent = 'En cours…';
+  document.getElementById('log-status').textContent = t('running');
+  document.getElementById('footer-status').textContent = t('running');
   setLogProgress(0, '');
   // Ouvrir automatiquement le panneau de log
   const panLog = document.getElementById('panneau-log');
@@ -5655,7 +5804,7 @@ async function lancer() {
       _running = false;
     }
   } catch(e) {
-    alert('Erreur de lancement : ' + e);
+    alert(t('launcherr') + e);
     btnReset(); _running = false;
   }
 }
@@ -5663,7 +5812,7 @@ async function lancer() {
 async function arreter() {
   try { await pywebview.api.stop(); } catch(e) {}
   _running = false;
-  document.getElementById('footer-status').textContent = '⚠ Arrêté';
+  document.getElementById('footer-status').textContent = t('stopped');
   btnReset();
 }
 
