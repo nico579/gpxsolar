@@ -110,7 +110,7 @@ if getattr(sys, "frozen", False):
                     (_gpx_home / "venv",  "venv Python"),
                 ]
                 print()
-                print("  ── Désinstallation gpxsolar ───────────────────────────────────")
+                print("  ── gpxsolar uninstall ───────────────────────────────────")
                 print()
                 _total_u = 0
                 for _c_u, _label_u in _cibles_u:
@@ -118,17 +118,17 @@ if getattr(sys, "frozen", False):
                         _taille_u = sum(
                             f.stat().st_size for f in _c_u.rglob("*") if f.is_file())
                         _total_u += _taille_u
-                        print(f"  Suppression {_label_u} ({_taille_u / 1e6:.0f} Mo)")
+                        print(f"  Suppression {_label_u} ({_taille_u / 1e6:.0f} MB)")
                         print(f"    {_c_u}")
                         _sh_u.rmtree(_c_u, ignore_errors=True)
-                        print(f"    {'✓ supprimé' if not _c_u.exists() else '⚠ partiel'}")
+                        print(f"    {'✓ removed' if not _c_u.exists() else '⚠ partial'}")
                     else:
                         print(f"  {_label_u} : absent ({_c_u})")
                 print()
-                print(f"  {_total_u / 1e6:.0f} Mo libérés.")
+                print(f"  {_total_u / 1e6:.0f} MB freed.")
                 print()
-                print("  Note : gpxsolar.py, l'exe/.app et le zip ne sont pas supprimés.")
-                print("  Supprimez-les manuellement si nécessaire.")
+                print("  Note: gpxsolar.py, the exe/.app and the zip are not removed.")
+                print("  Remove them manually if needed.")
                 sys.exit(0)
 
             def _bundle_sha():
@@ -185,10 +185,10 @@ if getattr(sys, "frozen", False):
                     except Exception:
                         _lock_actif = False
                     if not _lock_actif:
-                        print("  Lockfile périmé détecté — nettoyage et reprise.", flush=True)
+                        print("  Stale lockfile detected - cleaning up and resuming.", flush=True)
                         _lock.unlink(missing_ok=True)
                 if _lock_actif:
-                    print("Installation en cours dans une autre instance — attente...",
+                    print("Installation in progress in another instance - waiting...",
                           flush=True)
                     for _ in range(60):
                         _time.sleep(1)
@@ -198,9 +198,9 @@ if getattr(sys, "frozen", False):
                     if _inner_check.exists() and _sha_file.exists():
                         _need_extract = False
                     else:
-                        print("  ⚠ Installation concurrente incomplète ou échouée.",
+                        print("  ⚠ Concurrent install incomplete or failed.",
                               flush=True)
-                        print(f"  Supprimez le lockfile et relancez : {_lock}", flush=True)
+                        print(f"  Remove the lockfile and relaunch: {_lock}", flush=True)
                         sys.exit(1)
                 else:
                     _app_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -211,7 +211,7 @@ if getattr(sys, "frozen", False):
                             _sh.rmtree(_app_dir, ignore_errors=True)
                         _app_dir.mkdir(parents=True, exist_ok=True)
                         _bundle_size = _bundle.stat().st_size
-                        print(f"Premier lancement — installation ({_bundle_size // 1_000_000} Mo)...",
+                        print(f"First launch - installation ({_bundle_size // 1_000_000} MB)...",
                               flush=True)
                         # ditto (Mac) préserve le bit +x ; zipfile (Linux/fallback)
                         # le perd → on réapplique les permissions POSIX après coup.
@@ -283,10 +283,10 @@ if getattr(sys, "frozen", False):
                         _sha_file.write_text(
                             f"{_expected_sha}\n{_bundle.stat().st_mtime}",
                             encoding="utf-8")
-                        print("Installation terminée.", flush=True)
+                        print("Installation complete.", flush=True)
                     except Exception as _e_extract:
-                        print(f"\n  ⚠ Erreur d'extraction : {_e_extract}", flush=True)
-                        print("  Relancez l'application pour réessayer.", flush=True)
+                        print(f"\n  ⚠ Extraction error: {_e_extract}", flush=True)
+                        print("  Restart the application to try again.", flush=True)
                         sys.exit(1)
                     finally:
                         _lock.unlink(missing_ok=True)
@@ -430,15 +430,15 @@ def _imports_manquants(deps):
 def _afficher_erreur_deps(manquantes, hint=""):
     print()
     print("  ╔══════════════════════════════════════════════════════════════╗")
-    print("  ║  ERREUR : modules Python critiques manquants                 ║")
+    print("  ║  ERROR: missing critical Python modules".ljust(63) + " ║")
     print("  ╚══════════════════════════════════════════════════════════════╝")
-    print(f"  Manquants : {', '.join(manquantes)}")
+    print(f"  Missing: {', '.join(manquantes)}")
     if hint:
         print(f"  {hint}")
     print()
-    print("  Solutions :")
+    print("  Solutions:")
     print(f"    pip install {' '.join(manquantes)}")
-    print("    # ou créez un venv :")
+    print("    # or create a venv:")
     print("    python -m venv ~/.gpxsolar/venv")
     if platform.system() == "Windows":
         print("    %USERPROFILE%\\.gpxsolar\\venv\\Scripts\\pip install " + " ".join(manquantes))
@@ -478,7 +478,7 @@ def _bootstrap_venv_auto(force: bool = False):
     # Déjà dans CE venv ? (ré-entrée après exec)
     try:
         if Path(sys.prefix).resolve() == venv_path.resolve():
-            print(f"  [bootstrap] dans le venv {venv_path}")
+            print(f"  [bootstrap] inside venv {venv_path}")
             return
     except OSError:
         pass
@@ -487,8 +487,8 @@ def _bootstrap_venv_auto(force: bool = False):
     if not manquantes and not force:
         # Toutes les déps déjà importables : pas besoin de venv. Mais on l'annonce
         # pour que l'utilisateur ne s'attende pas à voir un venv apparaître.
-        print(f"  [bootstrap] dépendances déjà disponibles dans {sys.executable}")
-        print(f"             venv non créé — utilisez --bootstrap=force pour forcer la création")
+        print(f"  [bootstrap] dependencies already available in {sys.executable}")
+        print(f"             venv not created - use --bootstrap=force to force creation")
         return
 
     venv_bin = venv_path / ("Scripts" if is_windows else "bin")
@@ -501,7 +501,7 @@ def _bootstrap_venv_auto(force: bool = False):
             [str(venv_py), "-c", "import " + ",".join(m for m, _ in _DEPS_CRITIQUES)],
             capture_output=True)
         if check.returncode == 0:
-            print(f"  Relance dans le venv : {venv_path}")
+            print(f"  Relaunching in venv: {venv_path}")
             _relancer(venv_py, is_windows)
 
     if not venv_py.exists():
@@ -509,39 +509,39 @@ def _bootstrap_venv_auto(force: bool = False):
                  else "rm -rf ~/.gpxsolar")
         print()
         print("  ╔══════════════════════════════════════════════════════════════╗")
-        print("  ║  Premier lancement — création d'un venv isolé pour gpxsolar ║")
-        print("  ║  (~80 Mo une fois installé). Aucun impact sur Python système.║")
-        print(f"  ║  Pour le supprimer : {suppr}".ljust(63) + " ║")
-        print("  ║  Pour passer en install directe (sans venv) :                ║")
+        print("  ║  First launch - creating an isolated venv for gpxsolar".ljust(63) + " ║")
+        print("  ║  (~80 MB once installed). No impact on system Python.".ljust(63) + " ║")
+        print(f"  ║  To remove it: {suppr}".ljust(63) + " ║")
+        print("  ║  To use a direct install (no venv):".ljust(63) + " ║")
         print("  ║    python gpxsolar.py --bootstrap=pip                        ║")
         print("  ╚══════════════════════════════════════════════════════════════╝")
-        print(f"  Création du venv {venv_path}...")
+        print(f"  Creating venv {venv_path}...")
         try:
             subprocess.run([sys.executable, "-m", "venv", str(venv_path)],
                            check=True)
         except subprocess.CalledProcessError as e:
-            print(f"  ERREUR création venv : {e}")
-            print("  Installez Python 3.9+ avec le module venv (apt install python3-venv).")
+            print(f"  ERROR creating venv: {e}")
+            print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
             sys.exit(1)
 
     # Installation groupée des déps critiques + optionnelles
     pip_args_crit = [pkg for _, pkg in _DEPS_CRITIQUES]
     pip_args_opt  = [pkg for _, pkg in _DEPS_OPTIONNELLES]
-    print(f"  Installation des dépendances dans le venv (3-5 min)...")
+    print(f"  Installing dependencies in the venv (3-5 min)...")
     ok, err = _pip_install(venv_py, pip_args_crit + pip_args_opt, "venv-groupé")
     if not ok:
-        print(f"  Install groupée échouée, retry sans les optionnelles ({', '.join(pip_args_opt)})...")
+        print(f"  Bulk install failed, retrying without optional deps ({', '.join(pip_args_opt)})...")
         ok, err = _pip_install(venv_py, pip_args_crit, "venv-critique")
         if ok:
             for opt in pip_args_opt:
                 ok_one, _ = _pip_install(venv_py, [opt], f"venv-{opt}")
-                print(f"    {'✓' if ok_one else '⚠'} {opt} : {'OK' if ok_one else 'échec — fonctionnalité réduite'}")
+                print(f"    {'✓' if ok_one else '⚠'} {opt} : {'OK' if ok_one else 'failed - reduced functionality'}")
         else:
-            print(f"  ERREUR install déps critiques :\n  {err}")
+            print(f"  ERROR installing critical deps:\n  {err}")
             print(f"  Retry manuel : {venv_pip} install {' '.join(pip_args_crit)}")
             sys.exit(1)
-    print("  ✓ Dépendances installées.")
-    print("  Relance dans le venv...")
+    print("  ✓ Dependencies installed.")
+    print("  Relaunching in venv...")
     _relancer(venv_py, is_windows)
 
 
@@ -588,7 +588,7 @@ def _bootstrap_pip_courant():
             (base_cmd + all_pkgs + ["--user"],                  "--user"),
         ]
 
-    print(f"  Installation : {', '.join(all_pkgs)}...")
+    print(f"  Installing: {', '.join(all_pkgs)}...")
     last_err = ""
     for cmd, label in strategies:
         try:
@@ -610,14 +610,14 @@ def _bootstrap_pip_courant():
 
     # Retry sans optionnelles
     if opt_pkgs and crit_pkgs:
-        print(f"  Retry sans optionnelles ({', '.join(opt_pkgs)})...")
+        print(f"  Retry without optional ({', '.join(opt_pkgs)})...")
         ok, err = _pip_install(sys.executable, crit_pkgs, "courant-crit")
         if ok:
             importlib.invalidate_caches()
             still = [pkg for mod, pkg in _DEPS_CRITIQUES
                      if importlib.util.find_spec(mod) is None]
             if not still:
-                print("  ✓ Critiques installées (optionnelles indisponibles).")
+                print("  ✓ Critical deps installed (optional unavailable).")
                 return
 
     _afficher_erreur_deps(crit_pkgs,
@@ -638,29 +638,29 @@ def _installer_deps_et_quitter():
     venv_py    = venv_bin / ("python.exe" if is_windows else "python")
 
     if not venv_py.exists():
-        print(f"  Création du venv {venv_path}...")
+        print(f"  Creating venv {venv_path}...")
         try:
             subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True)
         except subprocess.CalledProcessError as e:
-            print(f"  ERREUR création venv : {e}")
-            print("  Installez Python 3.9+ avec le module venv (apt install python3-venv).")
+            print(f"  ERROR creating venv: {e}")
+            print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
             sys.exit(1)
 
     crit = [pkg for _, pkg in _DEPS_CRITIQUES]
     opt  = [pkg for _, pkg in _DEPS_OPTIONNELLES]
-    print(f"  Installation des dépendances dans {venv_path} (3-5 min)...")
+    print(f"  Installing dependencies in {venv_path} (3-5 min)...")
     ok, err = _pip_install(venv_py, crit + opt, "installer-deps")
     if not ok:
-        print(f"  Install groupée échouée, retry critiques seules...")
+        print(f"  Bulk install failed, retrying critical deps only...")
         ok, err = _pip_install(venv_py, crit, "installer-deps-crit")
         if ok:
             for o in opt:
                 ok_one, _ = _pip_install(venv_py, [o], f"opt-{o}")
-                print(f"    {'✓' if ok_one else '⚠'} {o} : {'OK' if ok_one else 'échec — fonctionnalité réduite'}")
+                print(f"    {'✓' if ok_one else '⚠'} {o} : {'OK' if ok_one else 'failed - reduced functionality'}")
         else:
-            print(f"  ERREUR install déps critiques :\n  {err}")
+            print(f"  ERROR installing critical deps:\n  {err}")
             sys.exit(1)
-    print(f"  ✓ Dépendances installées dans {venv_path}")
+    print(f"  ✓ Dependencies installed in {venv_path}")
     sys.exit(0)
 
 
@@ -674,7 +674,7 @@ def _bootstrap_environnement():
         _resoudre_mode_bootstrap()  # uniquement pour nettoyer sys.argv
         if "--installer-deps" in sys.argv:
             sys.argv.remove("--installer-deps")  # no-op en frozen (deps bundlées)
-        print("  [bootstrap] mode=frozen (PyInstaller binary) — bootstrap ignoré")
+        print("  [bootstrap] mode=frozen (PyInstaller binary) — bootstrap skipped")
         return
 
     # --installer-deps : install dédiée pour les scripts de build, puis exit.
@@ -689,7 +689,7 @@ def _bootstrap_environnement():
         if manquantes:
             _afficher_erreur_deps(manquantes, hint="Mode --bootstrap=none actif.")
             sys.exit(1)
-        print("  [bootstrap] toutes les dépendances critiques sont importables")
+        print("  [bootstrap] all critical dependencies are importable")
         return
     if mode == "pip":
         _bootstrap_pip_courant()
@@ -790,7 +790,7 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-# Numba en lazy load : son import (~3-4 s, charge llvmlite.dll 76 Mo) est
+# Numba en lazy load : son import (~3-4 s, charge llvmlite.dll 76 MB) est
 # différé jusqu'au 1er calcul. La GUI s'ouvre instantanément, le coût est
 # payé au clic "Lancer le calcul". Avec @cache=True les runs suivants
 # rechargent le binaire compilé depuis le cache.
@@ -822,7 +822,7 @@ def _try_load_numba():
     jit = _jit
     prange = _prange
     NUMBA_AVAILABLE = True
-    logging.info("Numba chargé — JIT des kernels (cache disque réutilisé si présent)")
+    logging.info("Numba loaded - JIT kernels (disk cache reused if present)")
 
     # Re-compile les 3 kernels chauds avec @jit, en remplaçant les versions
     # pure-Python définies plus bas.
@@ -960,7 +960,7 @@ try:
 
 except Exception as e:
 
-    logging.warning(f"Échec monkeypatch pysolar.tzinfo_check: {e}")
+    logging.warning(f"monkeypatch pysolar.tzinfo_check failed: {e}")
 
 
 
@@ -1265,7 +1265,7 @@ def save_config(data: dict) -> None:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=4)
     except OSError as e:
-        logging.warning(f"Sauvegarde de la configuration impossible : {e}")
+        logging.warning(f"Cannot save configuration: {e}")
 
 
 def save_history(cfg: dict, duration_s: float, output_path: str = "") -> None:
@@ -1289,7 +1289,7 @@ def save_history(cfg: dict, duration_s: float, output_path: str = "") -> None:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=2, ensure_ascii=False)
     except (OSError, TypeError, ValueError) as e:
-        logging.warning(f"Sauvegarde de l'historique impossible : {e}")
+        logging.warning(f"Cannot save history: {e}")
 
 
 def load_history() -> list:
@@ -1300,7 +1300,7 @@ def load_history() -> list:
                 data = json.load(f)
                 return data if isinstance(data, list) else []
     except (OSError, ValueError) as e:
-        logging.warning(f"Lecture historique impossible : {e}")
+        logging.warning(f"Cannot read history: {e}")
     return []
 
 
@@ -1311,7 +1311,7 @@ def clear_history() -> bool:
             json.dump([], f)
         return True
     except OSError as e:
-        logging.warning(f"Suppression historique impossible : {e}")
+        logging.warning(f"Cannot delete history: {e}")
         return False
 
 
@@ -1327,7 +1327,7 @@ def load_lang():
             v = d.get("lang") if isinstance(d, dict) else None
             return v if v in ("fr", "en") else None
     except (OSError, ValueError) as e:
-        logging.warning(f"Lecture préférences impossible : {e}")
+        logging.warning(f"Cannot read preferences: {e}")
     return None
 
 
@@ -1340,7 +1340,7 @@ def save_lang(code: str) -> bool:
             json.dump({"lang": code}, f, indent=2)
         return True
     except OSError as e:
-        logging.warning(f"Sauvegarde préférences impossible : {e}")
+        logging.warning(f"Cannot save preferences: {e}")
         return False
 
 
@@ -1351,7 +1351,7 @@ def load_config() -> dict:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except (OSError, ValueError) as e:
-        logging.warning(f"Chargement de la configuration impossible : {e}")
+        logging.warning(f"Cannot load configuration: {e}")
     return {}
 
 # *************************************************************
@@ -1522,19 +1522,19 @@ def get_department_from_coords(lat, lon):
                     DEPARTMENT_CACHE[cache_key] = dept_code # Mettre en cache
                     return dept_code
                 else:
-                    logging.warning(f"Impossible de trouver les informations de département pour les coordonnées {lat}, {lon}.")
+                    logging.warning(f"Cannot find department info for coordinates {lat}, {lon}.")
                     DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
                     return None
             else:
-                logging.warning(f"Aucune commune trouvée pour les coordonnées {lat}, {lon}.")
+                logging.warning(f"No municipality found for coordinates {lat}, {lon}.")
                 DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
                 return None
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Impossible de contacter l'API Géo pour le département: {e}")
+            logging.warning(f"Cannot reach the Geo API for the department: {e}")
             DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
             return None
         except (IndexError, KeyError, ValueError) as e: # Add ValueError for JSON decoding errors
-            logging.warning(f"Réponse inattendue de l'API Géo pour {lat}, {lon}: {e}")
+            logging.warning(f"Unexpected response from the Geo API for {lat}, {lon}: {e}")
             DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
             return None
 
@@ -1582,7 +1582,7 @@ class VegetationManager:
         if os.path.exists(output_path):
              return self._load_single_tile(os.path.basename(url))
 
-        logging.info(f"Téléchargement Végétation {tile_name} (~1GB)...")
+        logging.info(f"Downloading vegetation {tile_name} (~1GB)...")
         try:
             response = requests.get(url, stream=True)
             response.raise_for_status()
@@ -1600,14 +1600,14 @@ class VegetationManager:
 
             return self._load_single_tile(os.path.basename(output_path))
         except Exception as e:
-            logging.error(f"Erreur DL Végétation: {e}")
+            logging.error(f"Vegetation DL error: {e}")
             if os.path.exists(output_path): os.remove(output_path)
             return False
             
     def _load_tiles(self):
-        logging.info(f" > Scan du dossier Végétation ({self.worldcover_dir})...")
+        logging.info(f" > Scanning vegetation directory ({self.worldcover_dir})...")
         count = sum(1 for f in os.listdir(self.worldcover_dir) if f.endswith('.tif') and self._load_single_tile(f))
-        if count > 0: logging.info(f"   - {count} tuiles végétation chargées.")
+        if count > 0: logging.info(f"   - {count} vegetation tiles loaded.")
         if self.datasets: self.enabled = True
         
     def _load_single_tile(self, filename):
@@ -1628,7 +1628,7 @@ class VegetationManager:
             }
             return True
         except Exception as e:
-            logging.error(f"Erreur chargement tuile végétation {filename}: {e}")
+            logging.error(f"Error loading vegetation tile {filename}: {e}")
             return False
 
     def get_vegetation_heights_vec(self, lats, lons):
@@ -1963,7 +1963,7 @@ class LidarManager:
         """
         layer_name = self.LAYER_MAP.get(key)
         if not layer_name:
-            self.log(f"❌ Erreur: Couche {key} non reconnue")
+            self.log(f"❌ Error: Couche {key} non reconnue")
             return False
         
         x0 = tx * 1000
@@ -2392,7 +2392,7 @@ class HGTDataManager:
         base_url = "https://geoservices.ign.fr/telechargement-api/BDALTI"
         params = {"zone": f"D{dept_id}"}
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        logging.info(f" > Interrogation de l'API IGN (HTML): {base_url} pour BDALTI zone={params['zone']}")
+        logging.info(f" > Querying the IGN API (HTML): {base_url} for BDALTI zone={params['zone']}")
         try:
             response = requests.get(base_url, params=params, headers=headers, timeout=20)
             response.raise_for_status()
@@ -2403,19 +2403,19 @@ class HGTDataManager:
                 relative_url = matches[0]
                 download_url = urllib.parse.urljoin(response.url, relative_url)
                 archive_name = os.path.basename(download_url)
-                logging.info(f"   - URL BDALTI trouvée (via Regex): {download_url}")
+                logging.info(f"   - BDALTI URL found (via regex): {download_url}")
                 return download_url, archive_name
-            logging.warning("   - Erreur: Aucun lien de téléchargement .7z trouvé dans la réponse HTML.")
+            logging.warning("   - Error: No .7z download link found in the HTML response.")
             return None, None
         except Exception as e:
-            logging.error(f"   - Erreur inattendue lors de la récupération des informations BDALTI: {e}")
+            logging.error(f"   - Unexpected error retrieving BDALTI info: {e}")
             return None, None
     def _get_rgealti_download_info(self, department_code):
         dept_id = department_code.zfill(3) if department_code.isdigit() else department_code
         base_url = "https://geoservices.ign.fr/telechargement-api/RGEALTI"
         params = {"zone": f"D{dept_id}"}
         headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-        logging.info(f" > Interrogation de l'API IGN (HTML): {base_url} pour RGEALTI zone={params['zone']}")
+        logging.info(f" > Querying the IGN API (HTML): {base_url} for RGEALTI zone={params['zone']}")
         try:
             response = requests.get(base_url, params=params, headers=headers, timeout=20)
             response.raise_for_status()
@@ -2428,12 +2428,12 @@ class HGTDataManager:
                 if "rgealti" in url_lower and "5m" in url_lower and search_pattern_in_url in url_lower:
                     download_url = urllib.parse.urljoin(response.url, relative_url)
                     archive_name = os.path.basename(download_url)
-                    logging.info(f"   - URL RGEALTI 5M trouvée (via Regex): {download_url}")
+                    logging.info(f"   - RGEALTI 5M URL found (via regex): {download_url}")
                     return download_url, archive_name
-            logging.warning("   - Erreur: Aucun lien RGEALTI 5M .7z trouvé pour ce département.")
+            logging.warning("   - Error: No RGEALTI 5M .7z link found for this department.")
             return None, None
         except Exception as e:
-            logging.error(f"   - Erreur inattendue lors de la récupération des informations RGEALTI: {e}")
+            logging.error(f"   - Unexpected error retrieving RGEALTI info: {e}")
             return None, None
     def prepare_bdalti_data(self, department_code):
         base_ign_dir = './IGN_BDALTI_25M'
@@ -2482,10 +2482,10 @@ class HGTDataManager:
                         # Bornes d'une tuile SRTM1 (1 degré x 1 degré)
                         bbox_srtm = (float(lon_int), float(lat_int), float(lon_int + 1), float(lat_int + 1))
 
-        except Exception as e: logging.error(f"Erreur init SRTM: {e}")
+        except Exception as e: logging.error(f"SRTM init error: {e}")
     def _init_copernicus(self):
         if not RASTERIO_AVAILABLE:
-            logging.warning("rasterio non disponible, Copernicus DEM désactivé")
+            logging.warning("rasterio unavailable, Copernicus DEM disabled")
             self.source = 'srtm1'; self._init_srtm()
 
     def _handle_hgt_eviction(self, evicted_key, evicted_value):
@@ -2524,10 +2524,10 @@ class HGTDataManager:
                         progress = (downloaded_size / total_size) * 100
                         self.progress_callback(50 + progress * 0.05, f"DL IGN {os.path.basename(path)}: {progress:.1f}%") 
 
-        except Exception as e: logging.error(f"\n✗ Erreur DL archive IGN: {e}")
+        except Exception as e: logging.error(f"\n✗ IGN archive DL error: {e}")
     def _decompress_ign_archive(self, archive_path, dest_dir):
         if not PY7ZR_AVAILABLE:
-            logging.error("✗ Erreur: py7zr non installé (pip install py7zr).")
+            logging.error("✗ Error: py7zr not installed (pip install py7zr).")
             return False
 
         try:
@@ -2546,7 +2546,7 @@ class HGTDataManager:
 
             return True
         except Exception as e:
-            logging.error(f"✗ Erreur décompression: {e}")
+            logging.error(f"✗ Decompression error: {e}")
             return False
     def _load_ign_asc_tiles(self, ign_dir):
 
@@ -2589,7 +2589,7 @@ class HGTDataManager:
                                     self.ign_grid_tiles[tx][ty] = [] # Chaque cellule peut contenir plusieurs tuiles
                                 self.ign_grid_tiles[tx][ty].append(tile_key) # Stocke la clé de tuile, pas l'objet entier
                         new_tiles_found += 1
-                    except Exception as e: logging.warning(f"Entête .asc illisible {filename}: {e}")
+                    except Exception as e: logging.warning(f"Unreadable .asc header {filename}: {e}")
 
         if not self.ign_grid_tiles: raise MissingDataError(f"Aucune tuile .asc valide n'a pu être chargée depuis {os.path.abspath(ign_dir)}")
 
@@ -2988,7 +2988,7 @@ class HGTDataManager:
             return True
             
         except Exception as e:
-            logging.error(f"Erreur téléchargement Copernicus: {e}")
+            logging.error(f"Copernicus download error: {e}")
             if os.path.exists(output_path):
                 os.remove(output_path)
             return False
@@ -3424,7 +3424,7 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
     logging.info("Interpolation temporelle : %d segments [%s]",
                  n_seg, "Numba" if NUMBA_AVAILABLE else "NumPy")
     if n_seg > 0:
-        logging.info("   Début : %s, Fin : %s",
+        logging.info("   Start: %s, End: %s",
                      trace_points_with_time[0].time.strftime('%H:%M'),
                      trace_points_with_time[-1].time.strftime('%H:%M'))
 
@@ -3560,13 +3560,13 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     xmin_a, ymin_a, xmax_a, ymax_a, width, height, transform = \
         aligned_bbox_from_processeddata(processed_data, res, transformer_l93, margin_meters=margin_meters)
     
-    log_func(f"Grille: {width}x{height} pixels, résolution {res}m")
+    log_func(f"Grid: {width}x{height} pixels, resolution {res}m")
     
     
     # ✅ NOUVELLE LOGIQUE: Interpolation temporelle par segment (plus précise)
     trace_points_with_time = [item['point'] for item in processed_data]
     t_of_xy_vec = build_time_function_segmented(trace_points_with_time, transformer_l93)
-    log_func("Fonction d'interpolation temporelle par segment créée.")
+    log_func("Per-segment temporal interpolation function created.")
     
     profile = {
         'driver': 'GTiff', 'dtype': 'uint8', 'nodata': 255,
@@ -3580,7 +3580,7 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     
     GUI_UPDATE_INTERVAL = max(1, total_blocks // 20)
     
-    log_func(f"Traitement {total_blocks} blocs avec {num_workers} workers...")
+    log_func(f"Processing {total_blocks} blocks with {num_workers} workers...")
     
     hgt_manager.shadowmode = shadow_mode
     
@@ -3648,10 +3648,10 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
     Utilise rasterio et Pillow pour éviter une dépendance à GDAL.
     """
     if not PIL_AVAILABLE:
-        log_func("ERREUR: La librairie Pillow est requise pour la conversion PNG.")
+        log_func("ERROR: Pillow is required for PNG conversion.")
         return None
 
-    log_func("DEBUG: Démarrage de la conversion GeoTIFF -> KML GroundOverlay (avec Pillow).")
+    log_func("DEBUG: Starting GeoTIFF -> KML GroundOverlay conversion (with Pillow).")
     png_path = tif_path.replace(".tif", ".png")
 
     color_map = SHADOW_COLOR_MAP
@@ -3671,10 +3671,10 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
             # Créer l'image avec Pillow et la sauvegarder
             img = Image.fromarray(rgba)
             img.save(png_path)
-            log_func(f"DEBUG: Conversion GeoTIFF -> PNG terminée: {png_path}")
+            log_func(f"DEBUG: GeoTIFF -> PNG conversion done: {png_path}")
 
     except Exception as e:
-        log_func(f"ERREUR: Impossible de convertir le GeoTIFF en PNG: {e}")
+        log_func(f"ERROR: Cannot convert the GeoTIFF to PNG: {e}")
         traceback.print_exc()
         return None
 
@@ -3707,10 +3707,10 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
             go.gxlatlonquad.coords = [sw, se, ne, nw]
 
         kml.savekmz(kmz_output_path) # kmz_output_path est maintenant le chemin du KMZ
-        log_func(f"DEBUG: KMZ GroundOverlay créé: {kmz_output_path}")
+        log_func(f"DEBUG: KMZ GroundOverlay created: {kmz_output_path}")
         return kmz_output_path
     except Exception as e:
-        log_func(f"ERREUR: Impossible de créer le KMZ GroundOverlay: {e}")
+        log_func(f"ERROR: Cannot create the KMZ GroundOverlay: {e}")
         traceback.print_exc()
         return None
 
@@ -3736,7 +3736,7 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
     Réutilise SHADOW_COLOR_MAP : rendu identique à l'overlay KML.
     """
     if not PIL_AVAILABLE:
-        log_func("ERREUR: Pillow requis pour l'export MBTiles.")
+        log_func("ERROR: Pillow required for MBTiles export.")
         return None
 
     import sqlite3, io
@@ -3873,11 +3873,11 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
                 cur.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", batch)
                 con.commit()
             con.close()
-        log_func(f"DEBUG: MBTiles overlay créé: {mbtiles_path} "
+        log_func(f"DEBUG: MBTiles overlay created: {mbtiles_path} "
                  f"(z{zoom_min}-{zoom_max}, {total} tuiles)")
         return mbtiles_path
     except Exception as e:
-        log_func(f"ERREUR: Impossible de créer le MBTiles: {e}")
+        log_func(f"ERROR: Cannot create the MBTiles: {e}")
         traceback.print_exc()
         return None
 
@@ -3923,7 +3923,7 @@ def extend_to_sun(lat, lon, alt, sun_az, sun_alt):
 
 def create_kml_file(original_path, processed_data, passage_interval_min=0, local_tz=None, hgt_manager=None, visualize_tiles=False, visualize_sun_rays=False, sun_ray_interval=20, analysis_type='ombre_soleil'):
     if not SIMPLEKML_AVAILABLE:
-        logging.error("La librairie 'simplekml' est requise pour créer des fichiers KML.")
+        logging.error("The 'simplekml' library is required to create KML files.")
         return None
 
     kml = simplekml.Kml(name=f"Analyse {os.path.basename(original_path)}")
@@ -4170,7 +4170,7 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                         lon_max, lat_max = inv_transformer_ign.transform(x_max, y_max)
     
                     else:
-                        logging.warning(f"Transformer IGN/LiDAR non initialisé pour la tuile LiDAR {name}. Tuile non affichée.")
+                        logging.warning(f"IGN/LiDAR transformer not initialised for LiDAR tile {name}. Tile not shown.")
                         continue # Passer à la tuile suivante si la transformation ne peut pas être faite
                 elif source_type == 'ign':
                     name = os.path.basename(tile_identifier)
@@ -4182,7 +4182,7 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                         lon_min, lat_min = inv_transformer_ign.transform(x_min, y_min)
                         lon_max, lat_max = inv_transformer_ign.transform(x_max, y_max)
                     else:
-                        logging.warning("Transformer IGN non initialisé pour les tuiles IGN.")
+                        logging.warning("IGN transformer not initialised for IGN tiles.")
                 
                 if lon_min is not None and lat_min is not None and lon_max is not None and lat_max is not None:
                     pol = kml.newpolygon(name=name)
@@ -4199,7 +4199,7 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
 
     if visualize_sun_rays and processed_data:
         try:
-            logging.info(f"🌞 Création de {len(range(0, len(processed_data), sun_ray_interval))} rayons solaires (à la racine du KML)...")
+            logging.info(f"🌞 Creating {len(range(0, len(processed_data), sun_ray_interval))} sun rays (at the KML root)...")
             ray_styles = make_ray_styles()
             rays_created = 0
             
@@ -4250,13 +4250,13 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                     rays_created += 1
                         
                 except Exception as e:
-                    logging.warning(f"Erreur rayon point {idx}: {e}")
+                    logging.warning(f"Ray error at point {idx}: {e}")
                     continue
             
-            logging.info(f"✓ {rays_created} rayons solaires créés (à la racine du KML)")
+            logging.info(f"✓ {rays_created} sun rays created (at the KML root)")
             
         except Exception as e:
-            logging.error(f"ERREUR création rayons solaires: {e}")
+            logging.error(f"ERROR creating sun rays: {e}")
     
     if passage_interval_min and passage_interval_min > 0 and processed_data:
         try:
@@ -4334,7 +4334,7 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
 
             # Ne pas créer de placemark séparé pour l'arrivée: l'information est incluse dans le placemark combiné
         except Exception as e:
-            logging.warning(f"Impossible de créer les points de passage: {e}")
+            logging.warning(f"Cannot create waypoints: {e}")
 
     return kml
 
@@ -4376,7 +4376,7 @@ def profile_run_gui_process(*args_for_run_gui_process, **kwargs_for_run_gui_proc
 ")
         log_output(f"--- RAPPORT DE PROFILAGE complet enregistré dans : {report_filename} ---")
     except Exception as e:
-        log_output(f"ERREUR FATALE: Impossible d'enregistrer le rapport de profilage dans {report_filename} : {e}")
+        log_output(f"FATAL ERROR: Impossible d'enregistrer le rapport de profilage dans {report_filename} : {e}")
         # Optionally re-raise or handle more gracefully
         # raise # No, just log
     
@@ -4429,9 +4429,9 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 if tz_str:
                     local_tz_for_trace = pytz.timezone(tz_str)
                 else:
-                    log_func(f"Avertissement: Impossible de déterminer la timezone pour le point {points[0].latitude},{points[0].longitude}. Utilisation de UTC.")
+                    log_func(f"Warning: cannot determine timezone for point {points[0].latitude},{points[0].longitude}. Using UTC.")
             except Exception as e:
-                log_func(f"Avertissement: Erreur lors de la détermination de la timezone. Utilisation de UTC. Erreur: {e}")
+                log_func(f"Warning: error determining timezone. Using UTC. Error: {e}")
 
         if hgt_manager.source == 'ign_lidar_hd':
             hgt_manager.prepare_lidar_data(points, start_dt_naive)
@@ -4442,7 +4442,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 if hgt_manager.source == 'ign_bdalti_25m': hgt_manager.prepare_bdalti_data(department)
                 elif hgt_manager.source == 'ign_rgealti_5m': hgt_manager.prepare_rgealti_data(department)
             else:
-                log_func("⚠ Département non trouvé. Impossible de déterminer le département pour les sources IGN Alti.")
+                log_func("⚠ Department not found. Cannot determine the department for IGN Alti sources.")
                 return
 
         results, first_output_path = [], None
@@ -4491,7 +4491,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 
                 # Chemin pour le GeoTIFF
                 shadow_map_tif_path = os.path.join(SHADOW_GPX_DIR, f"{shadow_map_name_base}_{timestamp}.tif")
-                log_func(f"DEBUG: Chemin GeoTIFF de la carte d'ombre: {shadow_map_tif_path}")
+                log_func(f"DEBUG: Shadow map GeoTIFF path: {shadow_map_tif_path}")
 
                 
                 # Générer le GeoTIFF
@@ -4514,7 +4514,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                         trace_kml_obj.save(trace_kml_path)
                         log_func(f"DEBUG: Trace KML autonome (track Locus/OsmAnd): {trace_kml_path}")
                     except Exception as e_tr:
-                        log_func(f"AVERTISSEMENT: export trace KML ignoré: {e_tr}")
+                        log_func(f"WARNING: track KML export skipped: {e_tr}")
 
                 # Chemin pour le KMZ final
                 kmz_output_path = os.path.join(SHADOW_GPX_DIR, f"{shadow_map_name_base}.kmz")
@@ -4541,7 +4541,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                         shadow_map_tif_path, mbtiles_output_path, log_func,
                         progress_callback=progress_callback)
                 except Exception as e_mbt:
-                    log_func(f"AVERTISSEMENT: export MBTiles ignoré: {e_mbt}")
+                    log_func(f"WARNING: MBTiles export skipped: {e_mbt}")
 
 
             else:
@@ -4553,7 +4553,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 
                 if trace_kml_obj:
                     trace_kml_obj.save(out_path)
-                    log_func(f"   ✓ Fichier KML de trace créé : {out_name}")
+                    log_func(f"   ✓ Track KML file created: {out_name}")
                 
                 if first_output_path is None: first_output_path = out_path
 
@@ -4574,14 +4574,14 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
             df.to_csv(output_default, mode='a', header=output_is_empty, index=False, encoding='utf-8')
             
             if open_gpx_after_calc and first_output_path and os.path.exists(first_output_path):
-                log_func(f"✓ Traitement terminé. Ouverture de {first_output_path}")
+                log_func(f"✓ Processing complete. Opening {first_output_path}")
                 os.startfile(first_output_path)
             else:
-                log_func(f"✓ Traitement terminé. Sortie: {output_default}")
+                log_func(f"✓ Processing complete. Output: {output_default}")
 
     except Exception as e:
         traceback.print_exc()
-        log_func(f"ERREUR: {e}")
+        log_func(f"ERROR: {e}")
         raise
 
 def show_form(args, tz_finder, output_default):
@@ -4725,7 +4725,7 @@ def show_form(args, tz_finder, output_default):
                     file_types=("GPX files (*.gpx)", "All files (*.*)"))
                 return r[0] if r else ""
             except Exception as e:
-                logging.warning(f"pick_gpx erreur: {e}")
+                logging.warning(f"pick_gpx error: {e}")
                 return ""
 
         def poll_log(self):
@@ -4763,7 +4763,7 @@ def show_form(args, tz_finder, output_default):
             if not (f and d and t):
                 return {"error": "Veuillez spécifier un fichier GPX, une date et une heure."}
             if not os.path.exists(f):
-                return {"error": f"Fichier GPX introuvable : {f}"}
+                return {"error": f"GPX file not found: {f}"}
 
             # Conversion + sauvegarde config (forme stable, comme l'ancien tk)
             try:
@@ -4793,7 +4793,7 @@ def show_form(args, tz_finder, output_default):
             self._done = False
             self._retcode = None
             self._last_error = ""
-            self._progress = {"value": 0, "text": "Démarrage..."}
+            self._progress = {"value": 0, "text": "Starting..."}
             self._t_launch = datetime.now()
             self._cfg_launch = new_config
             while not log_queue.empty():
@@ -4814,10 +4814,10 @@ def show_form(args, tz_finder, output_default):
             def run():
                 try:
                     log_func("----------------------------------------------------------------------")
-                    log_func("Lancement du calcul...")
+                    log_func("Starting computation...")
                     runner = profile_run_gui_process if args.profile else run_gui_process
                     if args.profile:
-                        log_func("--- PROFILAGE ACTIVÉ (Traitement complet) ---")
+                        log_func("--- PROFILING ENABLED (full processing) ---")
                     runner(
                         f, d, t,
                         new_config['dem_source'],
@@ -4840,18 +4840,18 @@ def show_form(args, tz_finder, output_default):
                         new_config['analysis_type'],
                     )
                     self._retcode = 0
-                    self._progress = {"value": 100, "text": "Terminé"}
-                    log_func("✓ Calcul terminé avec succès.")
+                    self._progress = {"value": 100, "text": "Done"}
+                    log_func("✓ Computation completed successfully.")
                     try:
                         duree = (datetime.now() - self._t_launch).total_seconds()
                         save_history(self._cfg_launch, duree, args.output)
-                        log_func(f"  Historique sauvegardé ({HISTORY_FILE}).")
+                        log_func(f"  History saved ({HISTORY_FILE}).")
                     except Exception as he:
-                        log_func(f"  Historique non sauvegardé : {he}")
+                        log_func(f"  History not saved: {he}")
                 except Exception as e:
                     self._last_error = f"{type(e).__name__}: {e}"
                     self._retcode = 1
-                    log_func(f"ERREUR FATALE: {e}")
+                    log_func(f"FATAL ERROR: {e}")
                     traceback.print_exc()
                 finally:
                     self._done = True
@@ -5833,15 +5833,15 @@ def run_headless(args, tz_finder):
     Appelle directement run_gui_process (le moteur de calcul, indépendant de
     pywebview) puis retourne un code de sortie (0 = succès)."""
     if not args.gpx:
-        logging.error("Mode ligne de commande : --gpx est requis (avec --date "
+        logging.error("Command-line mode: --gpx is required (with --date "
                       "JJ/MM/AAAA et --time HH:MM). Lancez sans argument pour "
                       "ouvrir l'interface graphique.")
         return 2
     if not (args.date and args.time):
-        logging.error("--gpx nécessite aussi --date (JJ/MM/AAAA) et --time (HH:MM).")
+        logging.error("--gpx also requires --date (DD/MM/YYYY) and --time (HH:MM).")
         return 2
     if not os.path.exists(args.gpx):
-        logging.error(f"Fichier GPX introuvable : {args.gpx}")
+        logging.error(f"GPX file not found: {args.gpx}")
         return 2
 
     def log_func(msg):
@@ -5883,15 +5883,16 @@ def run_headless(args, tz_finder):
             args.analysis_type,
         )
     except Exception as e:
-        logging.error(f"ERREUR FATALE: {e}")
+        logging.error(f"FATAL ERROR: {e}")
         return 1
-    logging.info(f"✓ Calcul termine en {(datetime.now() - t0).total_seconds():.0f}s. "
+    logging.info(f"✓ Computation finished in {(datetime.now() - t0).total_seconds():.0f}s. "
                  f"Sorties dans {SHADOW_GPX_DIR} ; CSV : {args.output}")
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--version', action='version', version='gpxsolar 1.2.0 (2026-06)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
@@ -5970,7 +5971,7 @@ def main():
             self._real = None
         def _get(self):
             if self._real is None:
-                logging.info("Chargement de TimezoneFinder (~2.5 s : module + données)...")
+                logging.info("Loading TimezoneFinder (~2.5 s: module + data)...")
                 from timezonefinder import TimezoneFinder  # import différé
                 self._real = TimezoneFinder()
             return self._real
@@ -5994,6 +5995,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"ERREUR FATALE INATTENDUE: {e}")
+        print(f"UNEXPECTED FATAL ERROR: {e}")
         traceback.print_exc()
         input("\nAppuyez sur Entrée pour fermer...")
