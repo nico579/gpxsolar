@@ -4584,7 +4584,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         log_func(f"ERREUR: {e}")
         raise
 
-def show_form(args, tz_finder, output_default, help_text):
+def show_form(args, tz_finder, output_default):
     """
     Interface graphique PyWebView (HTML/CSS/JS) — style identique à lidar2map.py.
     Communication bidirectionnelle Python <-> JS via l'objet Api exposé.
@@ -4872,10 +4872,10 @@ def show_form(args, tz_finder, output_default, help_text):
         "slope_legend": SLOPE_LEGEND,
         "tile_legend": TILE_LEGEND,
         "time_options": generate_time_options(),
-        "help_text": help_text,
         "version": APP_VERSION,
         "historique": load_history(),
         "lang": load_lang(),   # None = auto-détection JS (navigator.language)
+        # (texte d'aide déplacé dans le dico I18N JS — clé help.body)
     }
     init_json = json.dumps(init_data, ensure_ascii=False).replace("</", "<\\/")
     HTML = _build_gpxsolar_html().replace(
@@ -5280,7 +5280,7 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
 <div id="help-modal" onclick="if(event.target===this)fermerAide()">
   <div class="inner">
     <h3 data-i18n="help.title">Aide — Simu Rando Solaire</h3>
-    <div id="help-body"></div>
+    <div id="help-body" data-i18n="help.body"></div>
     <div class="close"><button class="btn btn-sm" onclick="fermerAide()" data-i18n="close">Fermer</button></div>
   </div>
 </div>
@@ -5321,6 +5321,7 @@ const I18N = {
     "hist.title":"⏱ Historique des calculs", "clear":"🗑 Vider",
     "log.ready":"Prêt", "log.copy":"⎘ Copier", "log.hidetip":"Masquer (ré-affichable via le bouton Logs)",
     "help.title":"Aide — Simu Rando Solaire", "close":"Fermer",
+    "help.body":"Ce script analyse l'ensoleillement d'une trace GPX.\n\n1. Choisissez un fichier GPX.\n2. Sélectionnez une date et une heure de départ.\n3. Choisissez un modèle de données d'altitude:\n   - SRTM/Copernicus: Mondiaux, basse résolution.\n   - IGN ALTI: France, moyenne résolution.\n   - IGN LiDAR HD: France, très haute résolution.\n4. Choisissez les options de simulation (type d'ombre et sens).\n   - En mode LiDAR, les options contrôlent les couches (MNT, MNS, MNH).\n5. Lancez le calcul.\n\nLes résultats sont un fichier KML à ouvrir dans Google Earth et un rapport Excel.",
     // Dynamiques (JS) — {x} = placeholders pour tf()
     "initerr":"Erreur init : ", "log.init1":"Interface graphique initialisée.\n", "log.init2":"Prêt à lancer une simulation.\n",
     "hist.empty":"Aucun calcul enregistré.", "hist.recalled":"Paramètres rappelés depuis l'historique ({date})",
@@ -5356,6 +5357,7 @@ const I18N = {
     "hist.title":"⏱ Calculation history", "clear":"🗑 Clear",
     "log.ready":"Ready", "log.copy":"⎘ Copy", "log.hidetip":"Hide (re-show via the Logs button)",
     "help.title":"Help — Simu Rando Solaire", "close":"Close",
+    "help.body":"This tool analyses the sunlight along a GPX track.\n\n1. Choose a GPX file.\n2. Select a start date and time.\n3. Choose an elevation data model:\n   - SRTM/Copernicus: global, low resolution.\n   - IGN ALTI: France, medium resolution.\n   - IGN LiDAR HD: France, very high resolution.\n4. Choose the simulation options (shadow type and direction).\n   - In LiDAR mode, the options control the layers (DTM, DSM, CHM).\n5. Run the calculation.\n\nThe results are a KML file to open in Google Earth and an Excel report.",
     "initerr":"Init error: ", "log.init1":"GUI initialised.\n", "log.init2":"Ready to run a simulation.\n",
     "hist.empty":"No saved run.", "hist.recalled":"Parameters recalled from history ({date})",
     "hist.alreadyempty":"History is already empty.", "hist.confirm":"Delete {n} history entry(ies)?",
@@ -5418,7 +5420,6 @@ function initFromData(d) {
   buildLegend('legend-kml',   d.kml_legend || []);
   buildLegend('legend-slope', d.slope_legend || []);
   buildLegend('legend-tile',  d.tile_legend || []);
-  document.getElementById('help-body').textContent = d.help_text || '';
   loadDefaults(d.defaults || {});
   buildHistorique(d.historique || []);
   ajouterLigneLog(t('log.init1'), 'dim');
@@ -5944,17 +5945,6 @@ def main():
     grp_cli.add_argument('--open', action='store_true',
                          help='Ouvrir le résultat à la fin (Windows uniquement).')
 
-    help_text = "Ce script analyse l\'ensoleillement d\'une trace GPX.\n\n"
-    help_text += "1. Choisissez un fichier GPX.\n"
-    help_text += "2. Sélectionnez une date et une heure de départ.\n"
-    help_text += "3. Choisissez un modèle de données d\'altitude:\n"
-    help_text += "   - SRTM/Copernicus: Mondiaux, basse résolution.\n"
-    help_text += "   - IGN ALTI: France, moyenne résolution.\n"
-    help_text += "   - IGN LiDAR HD: France, très haute résolution.\n"
-    help_text += "4. Choisissez les options de simulation (type d\'ombre et sens).\n"
-    help_text += "   - En mode LiDAR, les options contrôlent les couches (MNT, MNS, MNH).\n"
-    help_text += "5. Lancez le calcul.\n\n"
-    help_text += "Les résultats sont un fichier KML à ouvrir dans Google Earth et un rapport Excel."
     args = parser.parse_args()
     
     # --- Début de la modification du logging ---
@@ -5993,7 +5983,7 @@ def main():
     # un flag GUI/DevTools) -> interface graphique ; sinon -> calcul headless.
     _is_only_debug = (len(sys.argv) == 2 and sys.argv[1] == "--debug")
     if len(sys.argv) == 1 or _is_only_debug:
-        show_form(args, tz_finder, args.output, help_text)
+        show_form(args, tz_finder, args.output)
     else:
         sys.exit(run_headless(args, tz_finder))
 
