@@ -5892,58 +5892,58 @@ def run_headless(args, tz_finder):
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--output', default='analyse_solaire.csv', help='Fichier CSV de sortie')
-    parser.add_argument('--hgt-dir', default='HGT', help='Répertoire des fichiers HGT (pour SRTM/Copernicus)')
-    parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Source DEM par défaut')
-    parser.add_argument('--interpolation', default='bilinear', choices=['nearest', 'bilinear', 'cubic'], help='Méthode d\'interpolation')
-    parser.add_argument('--analysis-resolution', type=float, default=5.0, help='Résolution d\'analyse pour le calcul d\'ombre (en mètres)') # Nouvelle ligne
-    parser.add_argument('--vegetation-dir', default='WorldCover', help='Répertoire WorldCover')
-    parser.add_argument('--passage-interval-min', type=int, default=0, help='Intervalle en minutes pour créer des points de passage dans le KML (0=aucun)')
-    parser.add_argument('--no-download-vegetation', action='store_true', help='Désactiver téléchargement auto végétation')
-    parser.add_argument('--no-vegetation-shadow', action='store_true', help='Désactiver complètement la détection d\'ombre de la végétation')
+    parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
+    parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
+    parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
+    parser.add_argument('--interpolation', default='bilinear', choices=['nearest', 'bilinear', 'cubic'], help='Interpolation method')
+    parser.add_argument('--analysis-resolution', type=float, default=5.0, help='Analysis resolution for shadow computation (in metres)')
+    parser.add_argument('--vegetation-dir', default='WorldCover', help='WorldCover directory')
+    parser.add_argument('--passage-interval-min', type=int, default=0, help='Interval in minutes to create waypoints in the KML (0=none)')
+    parser.add_argument('--no-download-vegetation', action='store_true', help='Disable automatic vegetation download')
+    parser.add_argument('--no-vegetation-shadow', action='store_true', help='Fully disable vegetation shadow detection')
     parser.add_argument('--max-shadow-distance', type=float, default=1000.0,
-                       help='Distance maximale de détection d\'ombre (en mètres, défaut: 1000)')
-    parser.add_argument('--profile', action='store_true', help='Activer le profilage de performance.')
-    parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Répertoire temporaire pour les rapports de profilage.')
-    parser.add_argument('--debug', action='store_true', help='Ouvre les DevTools pywebview (clic droit -> Inspecter / F12) pour voir la console JS et le bridge.')
+                       help='Maximum shadow detection distance (in metres, default: 1000)')
+    parser.add_argument('--profile', action='store_true', help='Enable performance profiling.')
+    parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Temporary directory for profiling reports.')
+    parser.add_argument('--debug', action='store_true', help='Open the pywebview DevTools (right-click -> Inspect / F12) to see the JS console and the bridge.')
 
     # --- Mode ligne de commande (headless), même méthode que lidar2map ---------
     # Sans argument -> GUI. Dès qu'un argument est passé, on bascule en mode CLI
     # (calcul direct sans fenêtre). Le calcul a besoin de --gpx + --date + --time.
     grp_cli = parser.add_argument_group(
-        'Mode ligne de commande (headless)',
-        "Passer --gpx (avec --date et --time) lance le calcul sans interface "
-        "graphique. Pratique pour scripter / serveur / reproduire un rendu.")
-    grp_cli.add_argument('--gpx', metavar='CHEMIN', default=None,
-                         help='Fichier GPX à analyser. Sa présence déclenche le mode CLI.')
-    grp_cli.add_argument('--date', metavar='JJ/MM/AAAA', default=None,
-                         help='Date de départ (ex: 21/06/2024).')
+        'Command-line mode (headless)',
+        "Passing --gpx (with --date and --time) runs the computation without a "
+        "GUI. Handy for scripting / server / reproducing a render.")
+    grp_cli.add_argument('--gpx', metavar='PATH', default=None,
+                         help='GPX file to analyse. Its presence triggers CLI mode.')
+    grp_cli.add_argument('--date', metavar='DD/MM/YYYY', default=None,
+                         help='Start date (e.g. 21/06/2024).')
     grp_cli.add_argument('--time', metavar='HH:MM', default=None,
-                         help='Heure de départ (ex: 09:00).')
+                         help='Start time (e.g. 09:00).')
     grp_cli.add_argument('--shadow-mode', choices=['relief', 'vegetation', 'both'],
-                         default='both', help='Type d\'ombre simulé (défaut: both).')
+                         default='both', help='Simulated shadow type (default: both).')
     grp_cli.add_argument('--direction', choices=['CW', 'CCW', 'both'], default='both',
-                         help='Sens de parcours simulé (défaut: both).')
+                         help='Simulated travel direction (default: both).')
     grp_cli.add_argument('--analysis-type', choices=['ombre_soleil', 'pente'],
-                         default='ombre_soleil', help='Type d\'analyse (défaut: ombre_soleil).')
+                         default='ombre_soleil', help='Analysis type (default: ombre_soleil).')
     grp_cli.add_argument('--visualize-tiles', action='store_true',
-                         help='Dessiner les tuiles/dalles DEM utilisées dans le KML.')
+                         help='Draw the DEM tiles used, in the KML.')
     grp_cli.add_argument('--generate-shadow-map', action='store_true',
-                         help='Générer la carte d\'ombre raster (fond de carte) en KMZ.')
+                         help='Generate the raster shadow map (basemap) as KMZ.')
     grp_cli.add_argument('--visualize-sun-rays', action='store_true',
-                         help='Dessiner les rayons solaires simulés dans le KML.')
+                         help='Draw the simulated sun rays in the KML.')
     grp_cli.add_argument('--sun-ray-interval', type=int, default=20,
-                         help='Intervalle entre rayons solaires (défaut: 20).')
+                         help='Interval between sun rays (default: 20).')
     grp_cli.add_argument('--batch-size', type=int, default=256,
-                         help='Taille de lot du calcul (défaut: 256).')
+                         help='Computation batch size (default: 256).')
     grp_cli.add_argument('--solar-step-s', type=int, default=60,
-                         help='Pas temporel du soleil en secondes (défaut: 60).')
+                         help='Sun time step in seconds (default: 60).')
     grp_cli.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS,
-                         help=f'Workers parallèles pour la carte d\'ombre (défaut: {DEFAULT_NUM_WORKERS} = nb de cœurs).')
+                         help=f'Parallel workers for the shadow map (default: {DEFAULT_NUM_WORKERS} = number of cores).')
     grp_cli.add_argument('--margin-meters', type=int, default=500,
-                         help='Marge autour de la trace en mètres (défaut: 500).')
+                         help='Margin around the track in metres (default: 500).')
     grp_cli.add_argument('--open', action='store_true',
-                         help='Ouvrir le résultat à la fin (Windows uniquement).')
+                         help='Open the result when done (Windows only).')
 
     args = parser.parse_args()
     
