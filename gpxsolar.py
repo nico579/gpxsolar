@@ -826,7 +826,7 @@ def _try_load_numba():
 
     # Re-compile les 3 kernels chauds avec @jit, en remplaçant les versions
     # pure-Python définies plus bas.
-    @_jit(nopython=True)
+    @_jit(nopython=True, cache=True)
     def _wc_jit(wc_values):
         heights = np.empty(len(wc_values), dtype=np.float64)
         for i in range(len(wc_values)):
@@ -895,7 +895,7 @@ def _try_load_numba():
 
 import inspect
 import pysolar.solar as pysolar_solar
-import pysolar.solartime as pysolartime # AJOUT
+import pysolar.solartime as pysolartime
 
 def _unwrap_inplace(mod, names):
     for n in names:
@@ -906,7 +906,8 @@ def _unwrap_inplace(mod, names):
             except Exception:
                 pass
 
-# Unwrap des fonctions vues dans TON profil (celles qui coûtent cher)
+# Unwrap des fonctions chaudes du profil : retire le décorateur tzinfo_check
+# (vérifications répétées inutiles — nos datetime sont toujours aware UTC).
 _unwrap_inplace(pysolar_solar, [
     "get_altitude",
     "get_azimuth",
@@ -917,112 +918,24 @@ _unwrap_inplace(pysolar_solar, [
     "get_geocentric_longitude",
     "get_heliocentric_longitude",
 ])
+_unwrap_inplace(pysolartime, ["get_julian_solar_day"])
 
-_unwrap_inplace(pysolartime, [
-
-    "get_julian_solar_day",
-
-])
-
-
-
-# Monkeypatch radical pour désactiver le décorateur tzinfo_check
-
+# Neutralise le décorateur tzinfo_check lui-même (couvre les fonctions
+# décorées après ce point ou non listées ci-dessus).
 try:
-
-    import pysolar.tzinfo_check as tz_check # Renommer pour éviter confusion
-
-    import functools # Nécessaire pour functools.wraps
+    import pysolar.tzinfo_check as tz_check
+    import functools
 
     def no_op_func_with_check(f):
-
-        # Cette fonction va remplacer le décorateur. Elle prend la fonction "f"
-
-        # et retourne un wrapper qui appelle simplement "f"
-
-        # sans effectuer les vérifications de tzinfo.
-
-        @functools.wraps(f) # Conserver les métadonnées de la fonction originale
-
+        @functools.wraps(f)
         def wrapper(*args, **kwargs):
-
             return f(*args, **kwargs)
-
         return wrapper
 
-    
-
-    # Remplacer le décorateur original par notre version no-op
-
     tz_check.func_with_check = no_op_func_with_check
-
     logging.debug("Monkeypatch pysolar.tzinfo_check.func_with_check appliqué.")
-
 except Exception as e:
-
     logging.warning(f"monkeypatch pysolar.tzinfo_check failed: {e}")
-
-
-
-# Remplacement dur: ne plus utiliser les fonctions décorées exposées par pysolar.solar
-
-
-
-# (on appelle directement le "noyau" via les fonctions internes déjà importées par le module) 
-
-
-
-
-def fast_altitude(lat, lon, dt_utc):
-
-
-
-    # dt_utc doit être timezone-aware UTC (tu le garantis déjà)
-
-
-
-    # Correction: utiliser '__wrapped__' pour le test hasattr et l'appel
-
-
-
-    if hasattr(pysolar_solar.get_altitude, "__wrapped__"):
-
-
-
-        return pysolar_solar.get_altitude.__wrapped__(lat, lon, dt_utc)
-
-
-
-    else:
-
-
-
-        return pysolar_solar.get_altitude(lat, lon, dt_utc)
-
-
-
-
-
-
-
-def fast_azimuth(lat, lon, dt_utc):
-
-
-
-    if hasattr(pysolar_solar.get_azimuth, "__wrapped__"):
-
-
-
-        return pysolar_solar.get_azimuth.__wrapped__(lat, lon, dt_utc)
-
-
-
-    else:
-
-
-
-        return pysolar_solar.get_azimuth(lat, lon, dt_utc)
-
 
 
 def fast_position(lat, lon, dt_utc):
@@ -1035,12 +948,6 @@ def fast_position(lat, lon, dt_utc):
         return f.__wrapped__(lat, lon, dt_utc)
     return f(lat, lon, dt_utc)
 
-
-GET_ALTITUDE = fast_altitude
-
-
-
-GET_AZIMUTH  = fast_azimuth
 
 GET_POSITION = fast_position
 
@@ -1079,31 +986,44 @@ class TransformerPool:
 
 
 class LRUTileCache:
+    """Cache LRU de tuiles. Thread-safe : get() MUTE l'OrderedDict
+    (move_to_end) et est appelé par les workers de compute_shadow_geotiff
+    pendant qu'un autre thread fait put() — même hazard que celui documenté
+    sur _BoundedDictCache, même réponse : un lock interne plutôt que compter
+    sur la discipline des appelants. eviction_callback est appelé HORS lock
+    (pas de risque de deadlock s'il repasse par le cache)."""
     def __init__(self, max_size=20):
         self.cache = OrderedDict()
         self.max_size = max_size
         self.eviction_callback = None
-    
+        self._lock = threading.Lock()
+
     def __contains__(self, key):
-        return key in self.cache
+        with self._lock:
+            return key in self.cache
 
     def get(self, key):
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return None
-    
+        with self._lock:
+            if key in self.cache:
+                self.cache.move_to_end(key)
+                return self.cache[key]
+            return None
+
     def put(self, key, value):
-        if len(self.cache) >= self.max_size:
-            evicted_key, evicted_value = self.cache.popitem(last=False)
-            if self.eviction_callback:
-                self.eviction_callback(evicted_key, evicted_value)
-        
-        self.cache[key] = value
-        self.cache.move_to_end(key)
+        evicted = None
+        with self._lock:
+            # N'évincer que si la clé est NOUVELLE (un simple update de clé
+            # existante ne fait pas grossir le cache).
+            if key not in self.cache and len(self.cache) >= self.max_size:
+                evicted = self.cache.popitem(last=False)
+            self.cache[key] = value
+            self.cache.move_to_end(key)
+        if evicted and self.eviction_callback:
+            self.eviction_callback(*evicted)
 
     def __len__(self):
-        return len(self.cache)
+        with self._lock:
+            return len(self.cache)
 
 
 
@@ -1147,12 +1067,18 @@ def _bilinear_sample_raster(data_arr, rows_f, cols_f, nodata=-9999, fallback=0.0
     h, w = data_arr.shape
     r0 = np.floor(rows_f).astype(np.int32)
     c0 = np.floor(cols_f).astype(np.int32)
-    r1 = r0 + 1
-    c1 = c0 + 1
     fy = (rows_f - r0).astype(np.float64)
     fx = (cols_f - c0).astype(np.float64)
 
-    valid = (r0 >= 0) & (r1 < h) & (c0 >= 0) & (c1 < w)
+    # Bord de raster : r0+1/c0+1 sont CLAMPÉS dans la grille au lieu
+    # d'invalider le point. L'ancien test (r1 < h) excluait la dernière
+    # demi-cellule de chaque tuile → fallback 0.0 : bande d'altitude 0 le
+    # long des coutures de tuiles (ombres sous-détectées, et pente Tobler
+    # aberrante si un point de trace y tombait). Avec r1 == r0 les poids
+    # bilinéaires dégénèrent proprement vers le voisin existant.
+    valid = (r0 >= 0) & (r0 < h) & (c0 >= 0) & (c0 < w)
+    r1 = np.minimum(r0 + 1, h - 1)
+    c1 = np.minimum(c0 + 1, w - 1)
     if not np.any(valid):
         return out
 
@@ -1191,9 +1117,10 @@ def equirect_m_vec(lat1, lon1, lat2, lon2, radius=EARTH_RADIUS):
     y = dlat
     return radius * np.sqrt(x * x + y * y)
 
-# Ajout pour le cache solaire
-SOLAR_ROUND_SEC = 600 # Par défaut 300 secondes (5 min) pour la quantification du temps
-SOLAR_ROUND_DEG = 2e-3 # Par défaut 1e-3 degrés pour la quantification des coordonnées (environ 111m)
+# Quantification du cache solaire (défauts ; le pas temporel effectif vient
+# de --solar-step-s / la GUI, transmis en `step_s`/`solar_step_s`).
+SOLAR_ROUND_SEC = 600   # 10 min
+SOLAR_ROUND_DEG = 2e-3  # ≈ 220 m en latitude
 
 
 class _BoundedDictCache:
@@ -1253,8 +1180,9 @@ SOLAR_CACHE = _BoundedDictCache(max_size=500_000)
 class MissingDataError(Exception):
     pass
 
-TZ_CACHE = {}
-TZ_CACHE_LOCK = threading.Lock() 
+# Lock du cache départements (l'ancien TZ_CACHE qu'il protégeait n'existait
+# plus ; seul get_department_from_coords l'utilise).
+DEPARTMENT_CACHE_LOCK = threading.Lock()
 
 # *************************************************************
 # GESTION DE LA CONFIGURATION
@@ -1378,6 +1306,33 @@ def generate_time_options():
             times.append(f"{h:02d}:{m}")
     return times
 
+
+def gpx_all_points(gpx_obj):
+    """Points de trace d'un objet gpxpy : concatène tous les segments de tous
+    les tracks. L'ancien accès direct tracks[0].segments[0] tronquait
+    silencieusement un GPX multi-segments au premier segment, et plantait en
+    IndexError brut sur un GPX à <rte> seul. Fallback sur les routes ;
+    GPXRoutePoint porte aussi latitude/longitude/elevation/time."""
+    pts = [p for trk in gpx_obj.tracks for seg in trk.segments for p in seg.points]
+    if not pts:
+        pts = [p for rte in gpx_obj.routes for p in rte.points]
+    if not pts:
+        raise MissingDataError("No track points in the GPX file (no <trk> nor <rte>).")
+    return pts
+
+
+def open_file_default_app(path):
+    """Ouvre un fichier avec l'application par défaut de l'OS.
+    os.startfile n'existe QUE sous Windows : le build macOS terminait en
+    erreur quand « ouvrir le résultat après calcul » était coché."""
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(path)
+    elif system == "Darwin":
+        subprocess.Popen(["open", path])
+    else:
+        subprocess.Popen(["xdg-open", path])
+
 def get_meters_per_degree_wgs84(lat):
     lat_rad = math.radians(lat)
     sin_lat = math.sin(lat_rad)
@@ -1448,15 +1403,17 @@ def solar_altaz_cached_vec(lats, lons, ts, step_s=SOLAR_ROUND_SEC):
     pour la clé de cache ; pour les misses, pysolar est appelé avec l'heure
     ORIGINALE reconstruite depuis ts[i] (résultat identique au calcul d'origine).
 
-    On prend des timestamps plutôt que des datetime pour éviter le double
-    aller-retour datetime↔timestamp : l'appelant (process_block, simulatehike)
-    possède déjà les timestamps, et on ne matérialise un objet datetime que
-    pour les misses de cache (rare quand la quantification 60 s mord)."""
+    Groupement par clé quantifiée via np.unique : un bloc de carte d'ombre
+    de 65 000 pixels ne contient que quelques dizaines de clés distinctes
+    (SOLAR_ROUND_DEG ≈ 220 m). L'ancienne boucle faisait n lookups
+    SOLAR_CACHE en Python, chacun prenant le lock du cache — contendu entre
+    les workers de compute_shadow_geotiff. On résout maintenant chaque clé
+    UNE fois puis on redistribue par indexation NumPy. return_index donne la
+    PREMIÈRE occurrence de chaque groupe comme représentant : même choix que
+    l'ancienne itération séquentielle → résultats identiques."""
     n = len(lats)
-    alts = np.empty(n, dtype=np.float64)
-    azs  = np.empty(n, dtype=np.float64)
     if n == 0:
-        return alts, azs
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
 
     lats_arr = np.asarray(lats, dtype=np.float64)
     lons_arr = np.asarray(lons, dtype=np.float64)
@@ -1471,72 +1428,79 @@ def solar_altaz_cached_vec(lats, lons, ts, step_s=SOLAR_ROUND_SEC):
     step_i = int(step_s)
     ts_q = (ts_arr.astype(np.int64) // step_i) * step_i  # entiers (timestamp UTC)
 
-    # Lookup cache + résolution des misses (datetime construit uniquement au miss)
-    for i in range(n):
-        key = (float(lat_q[i]), float(lon_q[i]), int(ts_q[i]))
+    # float64 représente exactement les entiers < 2^53 : ts_q reste exact.
+    keys = np.column_stack((lat_q, lon_q, ts_q.astype(np.float64)))
+    uniq, first_idx, inverse = np.unique(
+        keys, axis=0, return_index=True, return_inverse=True)
+
+    u_alts = np.empty(len(uniq), dtype=np.float64)
+    u_azs  = np.empty(len(uniq), dtype=np.float64)
+    for k in range(len(uniq)):
+        key = (float(uniq[k, 0]), float(uniq[k, 1]), int(uniq[k, 2]))
         v = SOLAR_CACHE.get(key)
-        if v is not None:
-            alts[i], azs[i] = v
-        else:
+        if v is None:
+            i = int(first_idx[k])   # représentant : coordonnées/temps ORIGINAUX
             dt_i = datetime.fromtimestamp(float(ts_arr[i]), tz=pytz.utc)
             z, a = GET_POSITION(lats_arr[i], lons_arr[i], dt_i)
-            alts[i] = a; azs[i] = z
-            SOLAR_CACHE[key] = (a, z)
+            v = (a, z)
+            SOLAR_CACHE[key] = v
+        u_alts[k], u_azs[k] = v
 
-    return alts, azs
+    return u_alts[inverse], u_azs[inverse]
 
 DEPARTMENT_CACHE = {} # Cache pour les résultats de get_department_from_coords
 
 def get_department_from_coords(lat, lon):
-    cache_key = (_q_coord_int(lat), _q_coord_int(lon)) # Utiliser la quantification entière pour la clé de cache
-    with TZ_CACHE_LOCK: # Using the existing TZ_CACHE_LOCK for thread safety, assuming it's appropriate here.
+    cache_key = (_q_coord_int(lat), _q_coord_int(lon))
+    with DEPARTMENT_CACHE_LOCK:
         if cache_key in DEPARTMENT_CACHE:
             return DEPARTMENT_CACHE[cache_key]
 
-        try:
-            url = f"https://geo.api.gouv.fr/communes?lat={lat}&lon={lon}"
-            response = requests.get(url)
-            response.raise_for_status()  # Lève une exception pour les codes d'état HTTP d'erreur (4xx ou 5xx) 
-            data = response.json()
+    # Réseau HORS lock (l'ancienne version tenait le lock global pendant les
+    # requêtes HTTP, elles-mêmes SANS timeout : un serveur muet gelait le
+    # thread pour toujours, lock détenu).
+    dept_code = None
+    try:
+        url = f"https://geo.api.gouv.fr/communes?lat={lat}&lon={lon}"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
 
-            if data:
-                # L'API peut retourner plusieurs communes si le point est à une intersection,
-                # nous prenons la première qui est généralement la plus pertinente.
-                commune_info = data[0]
-                department_name = commune_info.get('departement', {}).get('nom')
-                dept_code = commune_info.get('departement', {}).get('code')
-                
-                # Si les informations de département ne sont pas directement dans la commune,
-                # il faut parfois faire un appel supplémentaire.
-                if not department_name and 'codeDepartement' in commune_info:
-                    department_code_from_commune = commune_info['codeDepartement']
-                    dept_url = f"https://geo.api.gouv.fr/departements/{department_code_from_commune}"
-                    dept_response = requests.get(dept_url)
-                    dept_response.raise_for_status()
-                    dept_data = dept_response.json()
-                    if dept_data:
-                        department_name = dept_data.get('nom')
-                        dept_code = dept_data.get('code')
+        if data:
+            # L'API peut retourner plusieurs communes si le point est à une
+            # intersection ; la première est généralement la plus pertinente.
+            commune_info = data[0]
+            department_name = commune_info.get('departement', {}).get('nom')
+            dept_code = commune_info.get('departement', {}).get('code')
 
-                if department_name and dept_code:
-                    DEPARTMENT_CACHE[cache_key] = dept_code # Mettre en cache
-                    return dept_code
-                else:
-                    logging.warning(f"Cannot find department info for coordinates {lat}, {lon}.")
-                    DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
-                    return None
-            else:
-                logging.warning(f"No municipality found for coordinates {lat}, {lon}.")
-                DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
-                return None
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Cannot reach the Geo API for the department: {e}")
-            DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
-            return None
-        except (IndexError, KeyError, ValueError) as e: # Add ValueError for JSON decoding errors
-            logging.warning(f"Unexpected response from the Geo API for {lat}, {lon}: {e}")
-            DEPARTMENT_CACHE[cache_key] = None # Mettre en cache un résultat None pour éviter de refaire l'appel
-            return None
+            # Si les informations de département ne sont pas directement dans
+            # la commune, il faut parfois faire un appel supplémentaire.
+            if not department_name and 'codeDepartement' in commune_info:
+                dept_url = ("https://geo.api.gouv.fr/departements/"
+                            f"{commune_info['codeDepartement']}")
+                dept_response = requests.get(dept_url, timeout=15)
+                dept_response.raise_for_status()
+                dept_data = dept_response.json()
+                if dept_data:
+                    department_name = dept_data.get('nom')
+                    dept_code = dept_data.get('code')
+
+            if not (department_name and dept_code):
+                logging.warning(f"Cannot find department info for coordinates {lat}, {lon}.")
+                dept_code = None
+        else:
+            logging.warning(f"No municipality found for coordinates {lat}, {lon}.")
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"Cannot reach the Geo API for the department: {e}")
+        dept_code = None
+    except (IndexError, KeyError, ValueError) as e:
+        logging.warning(f"Unexpected response from the Geo API for {lat}, {lon}: {e}")
+        dept_code = None
+
+    # None aussi mis en cache : évite de refaire l'appel pour le même point.
+    with DEPARTMENT_CACHE_LOCK:
+        DEPARTMENT_CACHE[cache_key] = dept_code
+    return dept_code
 
 
 
@@ -1584,7 +1548,10 @@ class VegetationManager:
 
         logging.info(f"Downloading vegetation {tile_name} (~1GB)...")
         try:
-            response = requests.get(url, stream=True)
+            # timeout=(connect, read) : en stream, `read` borne l'attente
+            # ENTRE deux chunks, pas la durée totale — un gros fichier lent
+            # mais vivant passe, un serveur muet ne gèle plus le thread.
+            response = requests.get(url, stream=True, timeout=(10, 60))
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
             block_size = 8192
@@ -1760,12 +1727,15 @@ def compute_lidar_tiles_from_solar_rays_batched(
         if not np.any(valid):
             continue
 
-        sun_az = sun_azs_batch[valid] # Utiliser l'azimut du cache et filtrer avec valid
+        sun_az = sun_azs_batch[valid] # Azimuts du cache, déjà filtrés par valid
 
         rad_az = np.deg2rad(sun_az)
 
-        sin_az = np.sin(rad_az)[valid]
-        cos_az = np.cos(rad_az)[valid]
+        # PAS de second [valid] ici : rad_az est déjà filtré. Le ré-appliquer
+        # levait IndexError dès qu'un batch mélangeait points jour/nuit
+        # (masque de longueur nb sur un tableau de longueur n_valid).
+        sin_az = np.sin(rad_az)
+        cos_az = np.cos(rad_az)
 
         # Projection Lambert93
         xs, ys = transformer.transform(lon_b[valid], lat_b[valid])
@@ -1873,7 +1843,8 @@ class LidarManager:
             point_x, point_y: Coordonnées Lambert93 du point GPX
             tile_x, tile_y: Indices de la tuile
             solar_azimuth: Azimut solaire en degrés (0°=Nord, 90°=Est)
-            margin_degrees: Marge angulaire (100° = ±50° autour du soleil)
+            margin_degrees: Demi-angle du cône autour de l'azimut solaire
+                (100 = ±100°, soit un cône de 200°)
             
         Returns:
             True si la tuile peut être éclairée par le soleil
@@ -2009,7 +1980,16 @@ class LidarManager:
                         timeout=90
                     )
                     response.raise_for_status()
-                    
+
+                    # Un ServiceException WMS arrive en HTTP 200 avec un corps
+                    # XML : l'écrire en .tif créerait une tuile corrompue
+                    # PERMANENTE en cache (relue en boucle, jamais purgée).
+                    # Magic bytes TIFF : 'II*\0' (little-endian) / 'MM\0*'.
+                    if not response.content.startswith((b'II*\x00', b'MM\x00*')):
+                        head = response.content[:200].decode('utf-8', 'replace')
+                        raise requests.exceptions.RequestException(
+                            f"réponse WMS non-GeoTIFF : {head!r}")
+
                     with open(cache_path, 'wb') as f:
                         f.write(response.content)
                     
@@ -2289,7 +2269,6 @@ class HGTDataManager:
             
         processed_tiles = 0
         for key in ['mnt', 'mnh']:
-            self.lidar_manager.rasters.setdefault(key, {})
             for tx, ty in final_tiles:
                 self.lidar_manager._ensure_tile_downloaded(key, tx, ty)
                 self.lidar_manager._load_tile_to_ram(key, tx, ty)
@@ -2470,7 +2449,9 @@ class HGTDataManager:
         try:
             import srtm  # import différé (charge ~0.9 s)
             self.srtm_data = srtm.get_data()
-            # AJOUT: Ajouter les tuiles SRTM1 du répertoire à downloaded_tiles_info
+            # Référencer les tuiles SRTM1 du répertoire pour la visualisation
+            # (l'add avait été perdu : la boucle calculait bbox_srtm pour rien
+            # et visualize_tiles ne montrait jamais rien en source srtm1).
             for filename in os.listdir(self.hgt_dir):
                 if filename.lower().endswith('.hgt'):
                     match = re.search(r'([NS])(\d+)([EW])(\d+)', filename)
@@ -2481,6 +2462,7 @@ class HGTDataManager:
                         lon_int = lon_sign * int(match.group(4))
                         # Bornes d'une tuile SRTM1 (1 degré x 1 degré)
                         bbox_srtm = (float(lon_int), float(lat_int), float(lon_int + 1), float(lat_int + 1))
+                        self.downloaded_tiles_info.add(('srtm1', filename, bbox_srtm))
 
         except Exception as e: logging.error(f"SRTM init error: {e}")
     def _init_copernicus(self):
@@ -2510,21 +2492,29 @@ class HGTDataManager:
     def _download_ign_archive(self, url, path):
 
         try:
-            response = requests.get(url, stream=True)
+            # timeout=(connect, read) : read borne l'attente entre deux chunks
+            # (pas la durée totale) — un serveur muet ne gèle plus le thread.
+            response = requests.get(url, stream=True, timeout=(10, 60))
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
             block_size = 8192 # 8KB
             downloaded_size = 0
-            
-            with open(path, 'wb') as f: 
+
+            with open(path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     f.write(chunk)
                     downloaded_size += len(chunk)
                     if self.progress_callback and total_size > 0:
                         progress = (downloaded_size / total_size) * 100
-                        self.progress_callback(50 + progress * 0.05, f"DL IGN {os.path.basename(path)}: {progress:.1f}%") 
+                        self.progress_callback(50 + progress * 0.05, f"DL IGN {os.path.basename(path)}: {progress:.1f}%")
 
-        except Exception as e: logging.error(f"\n✗ IGN archive DL error: {e}")
+        except Exception as e:
+            logging.error(f"\n✗ IGN archive DL error: {e}")
+            # Purger l'archive partielle : sinon prepare_*_data la voit
+            # exister, saute le re-téléchargement et échoue en boucle sur la
+            # décompression (même filet que Copernicus/WorldCover).
+            if os.path.exists(path):
+                os.remove(path)
     def _decompress_ign_archive(self, archive_path, dest_dir):
         if not PY7ZR_AVAILABLE:
             logging.error("✗ Error: py7zr not installed (pip install py7zr).")
@@ -2644,8 +2634,12 @@ class HGTDataManager:
             
             filepath = metadata['path'] # Pour IGN, le chemin est dans 'path'
             try:
-                # Lecture des données (NumPy array)
-                data_arr = np.loadtxt(filepath, skiprows=6)
+                # Lecture des données. pandas.read_csv (parseur C) est ~5-10×
+                # plus rapide que np.loadtxt sur les .asc de 1000×1000 valeurs ;
+                # pandas est déjà une dépendance critique (import différé).
+                import pandas as pd
+                data_arr = pd.read_csv(filepath, sep=r'\s+', skiprows=6,
+                                       header=None, dtype=np.float64).to_numpy()
                 
                 # Gestion du cache LRU
                 self.hgt_rasters.put(tile_key, {
@@ -2780,11 +2774,8 @@ class HGTDataManager:
 
         # 4. Extraire les élévations, tuile par tuile
         for i, (lat_t, lon_t) in enumerate(unique_tile_coords):
-            # Reconstruire la clé de la tuile pour la retrouver dans le cache hgt_rasters
-            lat_prefix = 'N' if lat_t >= 0 else 'S'
-            lon_prefix = 'E' if lon_t >= 0 else 'W'
-            tile_filename = f"Copernicus_DSM_COG_10_{lat_prefix}{abs(lat_t):02d}_00_{lon_prefix}{abs(lon_t):03d}_00_DEM.tif"
-            tile_key = ('copernicus', tile_filename)
+            # Même helper que le téléchargement : clé garantie cohérente
+            tile_key = ('copernicus', self.copernicus_tile_filename(lat_t, lon_t))
 
             tile_data = self.hgt_rasters.get(tile_key)
             
@@ -2951,12 +2942,26 @@ class HGTDataManager:
                     elevations[original_indices_for_these_points] = vals
             
         return elevations
+    @staticmethod
+    def copernicus_tile_filename(lat, lon):
+        """Nom de tuile Copernicus pour des coordonnées : coin SW (floor) et
+        préfixes lat/lon INDÉPENDANTS. Source de vérité unique — l'ancienne
+        version, dupliquée en trois endroits, calculait les DEUX préfixes sur
+        le signe de la seule latitude et tronquait via int() : pour lon < 0
+        (ouest de la France, Espagne…) on téléchargeait une tuile 'E' erronée
+        tandis que l'extraction vectorisée reconstruisait le bon nom 'W' et
+        ne la retrouvait pas → élévations silencieusement à 0."""
+        lat_t = math.floor(lat)
+        lon_t = math.floor(lon)
+        lat_prefix = 'N' if lat_t >= 0 else 'S'
+        lon_prefix = 'E' if lon_t >= 0 else 'W'
+        return (f"Copernicus_DSM_COG_10_{lat_prefix}{abs(lat_t):02d}_00_"
+                f"{lon_prefix}{abs(lon_t):03d}_00_DEM.tif")
+
     def _download_copernicus_tile(self, lat, lon):
         if not RASTERIO_AVAILABLE: return None
-        lat_prefix, lon_prefix = ('N', 'E') if lat >= 0 else ('S', 'W')
-        lat_tile, lon_tile = int(lat), int(lon)
-        tile_name = f"Copernicus_DSM_COG_10_{lat_prefix}{abs(lat_tile):02d}_00_{lon_prefix}{abs(lon_tile):03d}_00_DEM"
-        filename = f"{tile_name}.tif"
+        filename = self.copernicus_tile_filename(lat, lon)
+        tile_name = filename[:-len(".tif")]
         output_path = os.path.join(self.hgt_dir, filename)
         if os.path.exists(output_path):
             return True # Déjà sur disque
@@ -2994,9 +2999,7 @@ class HGTDataManager:
             return False
 
     def _ensure_copernicus_tile_metadata_loaded(self, lat, lon):
-        lat_prefix, lon_prefix = ('N', 'E') if lat >= 0 else ('S', 'W')
-        lat_tile, lon_tile = int(lat), int(lon)
-        tile_filename = f"Copernicus_DSM_COG_10_{lat_prefix}{abs(lat_tile):02d}_00_{lon_prefix}{abs(lon_tile):03d}_00_DEM.tif"
+        tile_filename = self.copernicus_tile_filename(lat, lon)
         tile_key = ('copernicus', tile_filename)
 
         # Vérifier si les métadonnées sont déjà chargées
@@ -3040,8 +3043,10 @@ class HGTDataManager:
         elif self.source.startswith('ign_'): elev = self._get_ign_elevation(lat, lon) or 0.0
         elif self.srtm_data:
             elev = self.srtm_data.get_elevation(lat, lon) or 0.0
-            # AJOUT: Si la tuile SRTM1 a été utilisée, elle est considérée comme "chargée en RAM"
-            lat_int, lon_int = int(lat), int(lon)
+            # Si la tuile SRTM1 a été utilisée, elle est considérée comme "chargée en RAM".
+            # floor, pas int() : le nom de tuile est le coin SW (int() tronque
+            # vers 0 et désigne la mauvaise tuile pour lat/lon négatifs).
+            lat_int, lon_int = math.floor(lat), math.floor(lon)
             tile_name = f"{ 'N' if lat_int >= 0 else 'S' }{abs(lat_int):02d}{ 'E' if lon_int >= 0 else 'W' }{abs(lon_int):03d}.hgt"
             bbox_srtm = (float(lon_int), float(lat_int), float(lon_int + 1), float(lat_int + 1))
             self.loaded_in_ram_tiles.add(('srtm1', tile_name, bbox_srtm))
@@ -3051,8 +3056,10 @@ class HGTDataManager:
         return elev
 
 def adaptive_distances(max_dist, initial_step=5.0):
-    near = np.arange(initial_step, 50, initial_step)      # Réduit de 100 à 50
-    mid = np.arange(50, 300, initial_step * 3)            # Réduit de 500 à 300
+    # Chaque zone est bornée à max_dist : sans ce min(), un max_dist < 300
+    # traçait quand même jusqu'à ~300 m (la zone mid allait à 300 en dur).
+    near = np.arange(initial_step, min(50, max_dist), initial_step)
+    mid = np.arange(50, min(300, max_dist), initial_step * 3)
     far = np.arange(300, max_dist, initial_step * 8)      # Pas encore plus large
     return np.concatenate([near, mid, far])
 
@@ -3178,17 +3185,14 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
 
     obstacle_profile = ground_profile + object_heights
 
-    # 7. Comparaison vectorisée (pour inclure RELIEF_VEG)
+    # 7. Comparaison vectorisée (pour inclure RELIEF_VEG).
+    # compute_ray_intersections_detailed pointe vers le fallback NumPy ou le
+    # kernel Numba selon _try_load_numba — le rebind global fait l'aiguillage
+    # (l'ancien if/else re-dupliquait le fallback inline).
     TOLERANCE = 0.1
-    if NUMBA_AVAILABLE:
-        relief_is_blocking, veg_is_blocking = compute_ray_intersections_detailed(
-            obstacle_profile, ground_profile, object_heights, ray_altitudes, TOLERANCE
-        )
-    else:
-        relief_covers_ray = ground_profile > (ray_altitudes + TOLERANCE)
-        relief_is_blocking = np.any(relief_covers_ray, axis=1)
-        veg_covers_ray = (obstacle_profile > (ray_altitudes + TOLERANCE)) & (object_heights > 0)
-        veg_is_blocking = np.any(veg_covers_ray, axis=1)
+    relief_is_blocking, veg_is_blocking = compute_ray_intersections_detailed(
+        obstacle_profile, ground_profile, object_heights, ray_altitudes, TOLERANCE
+    )
 
     # 8. Mettre à jour les statuts (avec les codes uint8)
     temp_statuses = np.zeros(len(observer_lats), dtype=np.uint8) # 0 = SUN
@@ -3247,7 +3251,7 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
     _try_load_numba()
 
     starttimesim = datetime.now()
-    rawpoints = gpxobj.tracks[0].segments[0].points
+    rawpoints = gpx_all_points(gpxobj)
     simpoints = rawpoints if direction == "CW" else rawpoints[::-1]
     totalpoints = len(simpoints)
     logfunc = hgtmanager.log
@@ -3454,28 +3458,6 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
         thr = dC.min() + 2.0 * r
         return np.where(dC <= thr)[0]
 
-    def _nearest_numpy(xs, ys, sx1, sy1, sx2, sy2):
-        """Fallback NumPy si Numba absent — tiled pour la mémoire."""
-        n = xs.size; m = sx1.size
-        best_idx = np.empty(n, dtype=np.int64)
-        best_t   = np.empty(n, dtype=np.float64)
-        chunk = max(1024, min(8192, 65536 // max(1, m)))
-        for k in range(0, n, chunk):
-            px = xs[k:k+chunk, None]; py = ys[k:k+chunk, None]
-            dx = (sx2 - sx1)[None, :]
-            dy = (sy2 - sy1)[None, :]
-            L2 = dx*dx + dy*dy
-            L2_safe = np.where(L2 < 1e-12, 1.0, L2)
-            t = ((px - sx1[None, :])*dx + (py - sy1[None, :])*dy) / L2_safe
-            t = np.clip(t, 0.0, 1.0)
-            qx = sx1[None, :] + t*dx
-            qy = sy1[None, :] + t*dy
-            d2 = (px - qx)**2 + (py - qy)**2
-            idx = np.argmin(d2, axis=1)
-            best_idx[k:k+chunk] = idx
-            best_t[k:k+chunk]   = t[np.arange(idx.size), idx]
-        return best_idx, best_t
-
     def t_of_xy_vec(xs, ys):
         """Interpolation vectorisée — retourne np.ndarray[float64] de timestamps UTC."""
         xs = np.ascontiguousarray(xs, dtype=np.float64)
@@ -3490,10 +3472,11 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
         sx1 = np.ascontiguousarray(seg_x1[keep]); sy1 = np.ascontiguousarray(seg_y1[keep])
         sx2 = np.ascontiguousarray(seg_x2[keep]); sy2 = np.ascontiguousarray(seg_y2[keep])
 
-        if NUMBA_AVAILABLE:
-            bi, bt = _nearest_seg_with_param(xs, ys, sx1, sy1, sx2, sy2)
-        else:
-            bi, bt = _nearest_numpy(xs, ys, sx1, sy1, sx2, sy2)
+        # _nearest_seg_with_param : fallback NumPy ou kernel Numba selon
+        # _try_load_numba (rebind global — même pattern que wc_to_height et
+        # compute_ray_intersections_detailed ; l'ancienne closure _nearest_numpy
+        # dupliquait le fallback module-level).
+        bi, bt = _nearest_seg_with_param(xs, ys, sx1, sy1, sx2, sy2)
         gi = keep[bi]   # indices locaux (sous-ensemble) → indices globaux
         return seg_t1[gi] + bt * (seg_t2[gi] - seg_t1[gi])
 
@@ -3640,6 +3623,12 @@ SHADOW_COLOR_MAP = {c: (r, g, b, SHADOW_OVERLAY_ALPHA)
                     for c, (r, g, b) in SHADOW_RGB.items()}
 SHADOW_COLOR_MAP[255] = (0, 0, 0, 0)   # nodata → transparent
 
+# LUT code uint8 → RGBA : colorisation vectorisée en un coup (SHADOW_LUT[codes]),
+# partagée par l'export KMZ et l'export MBTiles (rendu garanti identique).
+SHADOW_LUT = np.zeros((256, 4), dtype=np.uint8)
+for _code, _rgba in SHADOW_COLOR_MAP.items():
+    SHADOW_LUT[_code] = _rgba
+
 
 def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_kml_obj=None, progress_callback=None):
     """
@@ -3654,20 +3643,12 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
     log_func("DEBUG: Starting GeoTIFF -> KML GroundOverlay conversion (with Pillow).")
     png_path = tif_path.replace(".tif", ".png")
 
-    color_map = SHADOW_COLOR_MAP
-
     try:
         with rasterio.open(tif_path) as src:
-            # Lire les données du raster
+            # Lire les données du raster et coloriser via la LUT partagée
             data = src.read(1)
-            
-            # Créer une image RGBA vide
-            rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
-            
-            # Appliquer la palette de couleurs
-            for value, color in color_map.items():
-                rgba[data == value] = color
-            
+            rgba = SHADOW_LUT[data]
+
             # Créer l'image avec Pillow et la sauvegarder
             img = Image.fromarray(rgba)
             img.save(png_path)
@@ -3766,15 +3747,11 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
         my = math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) * EARTH_R
         return mx, my
 
-    # LUT statut → RGBA (vectorise la colorisation : lut[codes] en un coup).
-    # Semi-transparence BAKÉE (SHADOW_COLOR_MAP) — l'utilisateur laisse l'opacité
-    # du calque à 100 % côté app, sinon Locus recompose les tuiles et fait
-    # réapparaître les coutures (cf. note de SHADOW_COLOR_MAP).
+    # Colorisation via SHADOW_LUT (LUT partagée avec l'export KMZ).
+    # Semi-transparence BAKÉE — l'utilisateur laisse l'opacité du calque à
+    # 100 % côté app, sinon Locus recompose les tuiles et fait réapparaître
+    # les coutures (cf. note de SHADOW_COLOR_MAP).
     # nodata (code 255) → (0,0,0,0) : hors emprise totalement transparent.
-    lut = np.zeros((256, 4), dtype=np.uint8)
-    for code, rgba in SHADOW_COLOR_MAP.items():
-        lut[code] = rgba
-
     try:
         with rasterio.open(tif_path) as src:
             transformer_wgs84 = TransformerPool.lambert_to_wgs84()
@@ -3859,7 +3836,7 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
                         codes = grid[ry:ry + TILE_SIZE, rx:rx + TILE_SIZE]
                         if not (codes != 255).any():
                             continue   # tuile entièrement nodata → transparente → rien à écrire
-                        rgba = lut[codes]   # (256, 256, 4)
+                        rgba = SHADOW_LUT[codes]   # (256, 256, 4)
                         buf = io.BytesIO()
                         Image.fromarray(rgba, "RGBA").save(
                             buf, "PNG", optimize=False, compress_level=6)
@@ -4404,20 +4381,20 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
 
 
 
-        hgt_manager = HGTDataManager('HGT', veg_manager, dem_source, 
-
+        # args.hgt_dir / args.interpolation : options CLI enfin transmises
+        # (elles étaient parsées mais 'HGT' et le défaut restaient codés en dur).
+        hgt_manager = HGTDataManager(args.hgt_dir, veg_manager, dem_source,
+                                     interpolation=args.interpolation,
                                      analysis_resolution=analysis_resolution,
-
-                                     max_shadow_distance=max_distance,  # ✅
-
+                                     max_shadow_distance=max_distance,
                                      log_func=log_func, progress_callback=progress_callback,
+                                     solar_step_s=solar_step_s)
 
-                                     solar_step_s=solar_step_s) # Ajout
-
-        with open(file_path, 'r', encoding='utf-8') as f:
+        # utf-8-sig : tolère le BOM que certains éditeurs/exports posent en tête
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             gpx_raw = gpxpy.parse(f)
-        
-        points = gpx_raw.tracks[0].segments[0].points
+
+        points = gpx_all_points(gpx_raw)
         
         # Déterminer la timezone une fois pour toute la trace
         # Utilise le premier point de la trace pour déterminer la TZ.
@@ -4451,7 +4428,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         for label, code in directions_to_run:
 
             # Cloner gpx_raw pour chaque simulation
-            with open(file_path, 'r', encoding='utf-8') as f_clone:
+            with open(file_path, 'r', encoding='utf-8-sig') as f_clone:
                 gpx_clone = gpxpy.parse(f_clone)
 
             # Appel direct de simulatehike, le profiler est au-dessus
@@ -4494,9 +4471,12 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 log_func(f"DEBUG: Shadow map GeoTIFF path: {shadow_map_tif_path}")
 
                 
-                # Générer le GeoTIFF
+                # Générer le GeoTIFF. margin_meters transmis : le réglage GUI
+                # « Marge bbox » était silencieusement ignoré (défaut 500 forcé).
                 compute_shadow_geotiff(
-                    data, hgt_manager, shadow_mode, float(analysis_resolution), shadow_map_tif_path, progress_callback, num_workers=num_workers
+                    data, hgt_manager, shadow_mode, float(analysis_resolution),
+                    shadow_map_tif_path, progress_callback,
+                    num_workers=num_workers, margin_meters=margin_meters
                 )
 
                 # Trace colorée exportée AUSSI en KML autonome (= un "track" Locus).
@@ -4575,7 +4555,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
             
             if open_gpx_after_calc and first_output_path and os.path.exists(first_output_path):
                 log_func(f"✓ Processing complete. Opening {first_output_path}")
-                os.startfile(first_output_path)
+                open_file_default_app(first_output_path)
             else:
                 log_func(f"✓ Processing complete. Output: {output_default}")
 
@@ -4598,7 +4578,9 @@ def show_form(args, tz_finder, output_default):
     import webview
     import json
 
-    APP_VERSION = "v28.5"
+    # Alignée sur --version (l'ancien "v28.5" était un compteur interne
+    # divergent de la version publiée).
+    APP_VERSION = "v1.2.1"
     config = load_config()
 
     # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
@@ -5892,11 +5874,13 @@ def run_headless(args, tz_finder):
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--version', action='version', version='gpxsolar 1.2.0 (2026-06)')
+    parser.add_argument('--version', action='version', version='gpxsolar 1.2.1 (2026-07)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
-    parser.add_argument('--interpolation', default='bilinear', choices=['nearest', 'bilinear', 'cubic'], help='Interpolation method')
+    # 'cubic' retiré des choices : accepté mais jamais implémenté (retombait
+    # silencieusement sur nearest).
+    parser.add_argument('--interpolation', default='bilinear', choices=['nearest', 'bilinear'], help='Interpolation method')
     parser.add_argument('--analysis-resolution', type=float, default=5.0, help='Analysis resolution for shadow computation (in metres)')
     parser.add_argument('--vegetation-dir', default='WorldCover', help='WorldCover directory')
     parser.add_argument('--passage-interval-min', type=int, default=0, help='Interval in minutes to create waypoints in the KML (0=none)')
