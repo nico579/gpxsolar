@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NoReturn
 
 # Force UTF-8 sur stdout/stderr : sous Windows, le défaut cp1252 fait planter
 # print() dès qu'on écrit un caractère non-Latin1 (flèches →, accents corrompus
@@ -138,7 +139,7 @@ def cprint(msg: str, color: str = "") -> None:
     else:
         print(msg)
 
-def fail(msg: str) -> "NoReturn":
+def fail(msg: str) -> NoReturn:
     cprint(f"\nERREUR : {msg}", "red")
     sys.exit(1)
 
@@ -199,15 +200,22 @@ def find_python() -> str:
 def clone_or_pull():
     if (CLONE / ".git").exists():
         cprint(f"==> Pull du repo existant : {CLONE}", "cyan")
-        git("fetch", "origin")
-        git("reset", "--hard", "origin/main")
-        git("clean", "-fd")
-    else:
-        cprint(f"==> Clone {REPO_URL} -> {CLONE}", "cyan")
-        if CLONE.exists():
-            shutil.rmtree(CLONE)
-        # Clone initial : peut prendre 1-2 min (assets binaires, screenshots).
-        run(["git", "clone", REPO_URL, str(CLONE)], timeout=300)
+        # fetch non-fatal : le clone temp peut être corrompu (nettoyage
+        # périodique de %TEMP% par Windows, copie interrompue, .git tronqué).
+        # Dans ce cas on supprime et on re-clone au lieu d'échouer sec.
+        r = git("fetch", "origin", check=False, capture=True)
+        if r.returncode == 0:
+            git("reset", "--hard", "origin/main")
+            git("clean", "-fd")
+            return
+        cprint(f"    Clone temp corrompu (fetch code {r.returncode}) — "
+               f"suppression + re-clone.", "yellow")
+        shutil.rmtree(CLONE, ignore_errors=True)
+    cprint(f"==> Clone {REPO_URL} -> {CLONE}", "cyan")
+    if CLONE.exists():
+        shutil.rmtree(CLONE)
+    # Clone initial : peut prendre 1-2 min (assets binaires, screenshots).
+    run(["git", "clone", REPO_URL, str(CLONE)], timeout=300)
 
 def remove_obsolete():
     cprint("\n==> Suppression des anciens chemins renommés", "cyan")
@@ -398,6 +406,15 @@ def main():
     changed = compute_diff()
 
     if not changed:
+        # --new-tag sans diff : cas légitime (sources déjà poussées lors d'un
+        # patch précédent, on veut ensuite un vrai rebuild taggé). L'ancien
+        # early return court-circuitait la création du tag.
+        if args.new_tag:
+            cprint(f"\n==> Aucun changement à pousser ; tag {args.new_tag} sur le HEAD courant.", "cyan")
+            git("tag", "-a", args.new_tag, "-m", args.message)
+            git("push", "origin", args.new_tag)
+            cprint(f"\n==> Tag {args.new_tag} poussé → release.yml va se déclencher (rebuild ~30 min sur 3 OS).", "green")
+            print(f"    Suivi : https://github.com/{args.repo}/actions/workflows/release.yml")
         return 0  # message déjà affiché par compute_diff
 
     if args.dry_run:
@@ -443,7 +460,7 @@ def main():
     if code_changed:
         tag = args.patch_tag or get_latest_tag(args.repo)
         cprint(f"\n==> [2/2] {APP_PY} modifié → patch via --mode {args.mode} sur {tag}", "cyan")
-        cprint(f"    Avertissement : si tu as touché au BLOC LAUNCHER ou aux DEPS dans", "yellow")
+        cprint("    Avertissement : si tu as touché au BLOC LAUNCHER ou aux DEPS dans", "yellow")
         cprint(f"    {APP_PY}, le patch ne suffit pas → rebuild via release.yml.", "yellow")
         invoke_patch(args.mode, args.repo, tag)
         return 0

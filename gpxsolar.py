@@ -1180,6 +1180,23 @@ SOLAR_CACHE = _BoundedDictCache(max_size=500_000)
 class MissingDataError(Exception):
     pass
 
+
+class CalculationCancelled(Exception):
+    """Arrêt demandé par l'utilisateur (bouton ■ de la GUI)."""
+    pass
+
+
+# Annulation COOPÉRATIVE : le calcul est synchrone dans un thread, on ne peut
+# pas le tuer ; Api.stop() pose cet event et le calcul sort proprement au
+# prochain point de contrôle (batch de points, bloc de carte, tuile, chunk de
+# téléchargement) en levant CalculationCancelled. Api.launch() l'efface.
+CANCEL_EVENT = threading.Event()
+
+
+def check_cancelled():
+    if CANCEL_EVENT.is_set():
+        raise CalculationCancelled("stop requested")
+
 # Lock du cache départements (l'ancien TZ_CACHE qu'il protégeait n'existait
 # plus ; seul get_department_from_coords l'utilise).
 DEPARTMENT_CACHE_LOCK = threading.Lock()
@@ -1557,8 +1574,9 @@ class VegetationManager:
             block_size = 8192
             downloaded_size = 0
 
-            with open(output_path, 'wb') as f: 
+            with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
+                    check_cancelled()
                     f.write(chunk)
                     downloaded_size += len(chunk)
                     if self.progress_callback and total_size > 0:
@@ -1566,6 +1584,11 @@ class VegetationManager:
                         self.progress_callback(50 + progress * 0.05, f"DL WorldCover {tile_name}: {progress:.1f}%")
 
             return self._load_single_tile(os.path.basename(output_path))
+        except CalculationCancelled:
+            # Arrêt utilisateur : purger le fichier partiel et PROPAGER
+            # (le except Exception ci-dessous avalerait l'annulation).
+            if os.path.exists(output_path): os.remove(output_path)
+            raise
         except Exception as e:
             logging.error(f"Vegetation DL error: {e}")
             if os.path.exists(output_path): os.remove(output_path)
@@ -2270,6 +2293,7 @@ class HGTDataManager:
         processed_tiles = 0
         for key in ['mnt', 'mnh']:
             for tx, ty in final_tiles:
+                check_cancelled()
                 self.lidar_manager._ensure_tile_downloaded(key, tx, ty)
                 self.lidar_manager._load_tile_to_ram(key, tx, ty)
                 
@@ -2502,12 +2526,18 @@ class HGTDataManager:
 
             with open(path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
+                    check_cancelled()
                     f.write(chunk)
                     downloaded_size += len(chunk)
                     if self.progress_callback and total_size > 0:
                         progress = (downloaded_size / total_size) * 100
                         self.progress_callback(50 + progress * 0.05, f"DL IGN {os.path.basename(path)}: {progress:.1f}%")
 
+        except CalculationCancelled:
+            # Arrêt utilisateur : purger l'archive partielle et PROPAGER.
+            if os.path.exists(path):
+                os.remove(path)
+            raise
         except Exception as e:
             logging.error(f"\n✗ IGN archive DL error: {e}")
             # Purger l'archive partielle : sinon prepare_*_data la voit
@@ -3244,7 +3274,8 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
     return final_statuses_str, shadow_hits
 
 def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
-                 progresscallback=None, batch_size=256, solar_step_s=SOLAR_ROUND_SEC):
+                 progresscallback=None, batch_size=256, solar_step_s=SOLAR_ROUND_SEC,
+                 compute_shadows=True):
 
     # Charge numba à la demande (différé depuis l'import pour accélérer
     # l'ouverture de la GUI). Idempotent — no-op si déjà chargé.
@@ -3302,16 +3333,24 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
 
     # === (D) PASS 2 : calcul ombres (ton code existant) ===
 
-    allstatuses = []
-    all_shadow_hits = []
-    # Mettre à jour le shadowmode dans hgtmanager avant le ray-tracing
-    hgtmanager.shadowmode = shadowmode
-    for i in range(0, totalpoints, batch_size):
-        sl = slice(i, i + batch_size)
-        batchstatuses, batch_shadow_hits = get_sun_blocking_type_vec(
-            alllats[sl], alllons[sl], times_ts[sl], hgtmanager, solar_step_s)
-        allstatuses.extend(batchstatuses)
-        all_shadow_hits.extend(batch_shadow_hits)
+    if not compute_shadows:
+        # Analyse pente : le ray-tracing d'ombre est inutile — et coûteux,
+        # c'est lui qui consomme MNH/végétation. Seuls servent le MNT le long
+        # de la trace (pentes, déjà calculé en PASS 1) et les temps de parcours.
+        allstatuses = ['SUN'] * totalpoints
+        all_shadow_hits = [None] * totalpoints
+    else:
+        allstatuses = []
+        all_shadow_hits = []
+        # Mettre à jour le shadowmode dans hgtmanager avant le ray-tracing
+        hgtmanager.shadowmode = shadowmode
+        for i in range(0, totalpoints, batch_size):
+            check_cancelled()
+            sl = slice(i, i + batch_size)
+            batchstatuses, batch_shadow_hits = get_sun_blocking_type_vec(
+                alllats[sl], alllons[sl], times_ts[sl], hgtmanager, solar_step_s)
+            allstatuses.extend(batchstatuses)
+            all_shadow_hits.extend(batch_shadow_hits)
 
     # === (E) PASS 3 : agrégation (on réutilise dist/durée pré-calculés) ===
 
@@ -3566,10 +3605,11 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     log_func(f"Processing {total_blocks} blocks with {num_workers} workers...")
     
     hgt_manager.shadowmode = shadow_mode
-    
+
+    cancelled = False
     with rasterio.open(out_tif, 'w', **profile) as dst:
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            
+
             block_tasks = []
             for j in range(0, height, block_size):
                 for i in range(0, width, block_size):
@@ -3579,23 +3619,39 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
                            res, t_of_xy_vec,
                            shadow_mode, hgt_manager)
                     block_tasks.append(args)
-            
+
             futures = {executor.submit(process_block, task): task for task in block_tasks}
-            
+
             for future in concurrent.futures.as_completed(futures):
+                if CANCEL_EVENT.is_set():
+                    # Annule les blocs pas encore démarrés ; les num_workers
+                    # blocs en cours finissent (le shutdown du with attend),
+                    # leurs résultats sont ignorés.
+                    for f in futures:
+                        f.cancel()
+                    cancelled = True
+                    break
                 i, j, result_block = future.result()
-                dst.write(result_block, 
-                         window=Window(i, j, result_block.shape[1], 
+                dst.write(result_block,
+                         window=Window(i, j, result_block.shape[1],
                                       result_block.shape[0]), indexes=1)
-                
+
                 processed_blocks += 1
-                
+
                 # 🔥 Update GUI uniquement tous les N blocs
-                if progress_callback and (processed_blocks % GUI_UPDATE_INTERVAL == 0 
+                if progress_callback and (processed_blocks % GUI_UPDATE_INTERVAL == 0
                                          or processed_blocks == total_blocks):
                     progress = 60 + (processed_blocks / total_blocks) * 30
-                    progress_callback(progress, 
+                    progress_callback(progress,
                                     f"Carte: {processed_blocks}/{total_blocks}")
+
+    if cancelled:
+        # Carte partielle inutilisable : la purger avant de remonter.
+        try:
+            os.remove(out_tif)
+        except OSError:
+            pass
+        raise CalculationCancelled("stop requested")
     
 
 
@@ -4372,10 +4428,17 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         
 
 
+        # L'analyse pente ne consomme AUCUNE donnée d'ombre : ni végétation
+        # WorldCover (~1 GB/tuile), ni corridor solaire LiDAR (dizaines de
+        # tuiles MNT+MNH) — sauf si la carte d'ombre est aussi demandée. Le
+        # ray-tracing de la trace n'a de sens qu'en analyse ombre/soleil.
+        want_shadow_data = (analysis_type == 'ombre_soleil') or generate_shadow_map
+        compute_shadows = (analysis_type == 'ombre_soleil')
+
         veg_manager = None
         # Le LiDAR HD inclut déjà la végétation (MNH), donc on n'active le
         # gestionnaire de végétation WorldCover que pour les autres sources.
-        if dem_source != 'ign_lidar_hd' and not args.no_vegetation_shadow:
+        if want_shadow_data and dem_source != 'ign_lidar_hd' and not args.no_vegetation_shadow:
 
             veg_manager = VegetationManager(args.vegetation_dir, not args.no_download_vegetation, progress_callback=progress_callback)
 
@@ -4411,7 +4474,13 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 log_func(f"Warning: error determining timezone. Using UTC. Error: {e}")
 
         if hgt_manager.source == 'ign_lidar_hd':
-            hgt_manager.prepare_lidar_data(points, start_dt_naive)
+            if want_shadow_data:
+                hgt_manager.prepare_lidar_data(points, start_dt_naive)
+            else:
+                # Pente seule : pas de préchargement du corridor solaire ; les
+                # tuiles MNT sous la trace seront lazy-chargées par le calcul.
+                log_func("Slope-only analysis: solar-corridor tile preload skipped "
+                         "(MNT lazy-loaded along the track).")
         elif hgt_manager.source.startswith('ign_'):
              # Logique département pour BD ALTI...
             department = get_department_from_coords(points[0].latitude, points[0].longitude)
@@ -4426,14 +4495,18 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         directions_to_run = [("Sens Horaire", "CW"), ("Sens Anti-Horaire", "CCW")] if direction == 'both' else [(direction, direction.upper())]
 
         for label, code in directions_to_run:
+            check_cancelled()
 
             # Cloner gpx_raw pour chaque simulation
             with open(file_path, 'r', encoding='utf-8-sig') as f_clone:
                 gpx_clone = gpxpy.parse(f_clone)
 
             # Appel direct de simulatehike, le profiler est au-dessus
-            # Appel direct de simulatehike, le profiler est au-dessus
-            data, stats = simulatehike(gpx_clone, start_dt_naive, hgt_manager, local_tz_for_trace, code, shadow_mode, progress_callback, batch_size=batch_size, solar_step_s=solar_step_s)
+            data, stats = simulatehike(gpx_clone, start_dt_naive, hgt_manager,
+                                       local_tz_for_trace, code, shadow_mode,
+                                       progress_callback, batch_size=batch_size,
+                                       solar_step_s=solar_step_s,
+                                       compute_shadows=compute_shadows)
             
             if not data: continue
             
@@ -4539,12 +4612,16 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
 
             tot_dur = stats['totaldur']
             row = {
-                "Fichier": out_name, "Départ": start_dt_naive, 
+                "Fichier": out_name, "Départ": start_dt_naive,
                 "Dist Totale (km)": round(stats['totaldist']/1000, 2), "Durée Totale": str(timedelta(seconds=int(tot_dur))),
                 "% Ensoleillé": round(stats['dursun']/tot_dur*100, 1) if tot_dur else 0,
                 "% Ombre Relief": round(stats['durrelief']/tot_dur*100, 1) if tot_dur else 0,
                 "% Ombre Végét.": round(stats['durveg']/tot_dur*100, 1) if tot_dur else 0,
             }
+            if not compute_shadows:
+                # Mode pente : pas de ray-tracing, un « 100 % ensoleillé »
+                # serait trompeur → colonnes d'ombre laissées vides.
+                row["% Ensoleillé"] = row["% Ombre Relief"] = row["% Ombre Végét."] = ""
             results.append(row)
 
         if results:
@@ -4559,6 +4636,9 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
             else:
                 log_func(f"✓ Processing complete. Output: {output_default}")
 
+    except CalculationCancelled:
+        log_func("⚠ Calcul arrêté par l'utilisateur.")
+        raise
     except Exception as e:
         traceback.print_exc()
         log_func(f"ERROR: {e}")
@@ -4728,12 +4808,15 @@ def show_form(args, tz_finder, output_default):
             return {"msg": self._last_error or "", "retcode": self._retcode or 0}
 
         def stop(self):
-            # Le calcul est synchrone dans un thread daemon ; on ne peut pas
-            # le tuer proprement sans coopération. On marque seulement l'arrêt
-            # demandé pour libérer l'UI ; le thread se terminera naturellement.
-            log_queue.put({"line": "\n⚠ Arrêt demandé (le calcul en cours continue jusqu'à la prochaine étape)\n",
-                           "tag": "err"})
-            self._done = True
+            # Annulation coopérative : on pose l'event, le calcul lève
+            # CalculationCancelled au prochain point de contrôle (batch,
+            # bloc, tuile, chunk) et run() se termine → _done passe à True.
+            # L'ancienne version posait _done=True SANS arrêter le thread :
+            # l'UI se libérait mais launch() répondait ensuite « un calcul
+            # est déjà en cours » tant que le thread vivait.
+            CANCEL_EVENT.set()
+            log_queue.put({"line": "\n⚠ Arrêt demandé - sortie au prochain point de contrôle...\n",
+                           "tag": "warn"})
 
         def launch(self, cfg):
             if self._thread and self._thread.is_alive():
@@ -4772,6 +4855,7 @@ def show_form(args, tz_finder, output_default):
             except Exception as e:
                 return {"error": f"Erreur paramètres : {e}"}
 
+            CANCEL_EVENT.clear()   # réarme après un éventuel arrêt précédent
             self._done = False
             self._retcode = None
             self._last_error = ""
@@ -4830,6 +4914,12 @@ def show_form(args, tz_finder, output_default):
                         log_func(f"  History saved ({HISTORY_FILE}).")
                     except Exception as he:
                         log_func(f"  History not saved: {he}")
+                except CalculationCancelled:
+                    # 130 = convention Unix (SIGINT) ; le JS l'affiche comme
+                    # « Arrêté », pas comme une erreur.
+                    self._retcode = 130
+                    self._progress = {"value": 100, "text": "Stopped"}
+                    log_func("⚠ Calcul arrêté par l'utilisateur.")
                 except Exception as e:
                     self._last_error = f"{type(e).__name__}: {e}"
                     self._retcode = 1
@@ -5314,6 +5404,7 @@ const I18N = {
     "req.gpx":"Veuillez sélectionner un fichier GPX.", "req.date":"Veuillez sélectionner une date.",
     "req.time":"Veuillez sélectionner une heure.", "req.dem":"Veuillez sélectionner un modèle d'altitude.",
     "running":"En cours…", "launcherr":"Erreur de lancement : ", "stopped":"⚠ Arrêté",
+    "stopping":"⏳ Arrêt en cours…",
   },
   en: {
     "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.help":"? Help", "btn.hist":"⏱ History",
@@ -5349,6 +5440,7 @@ const I18N = {
     "req.gpx":"Please select a GPX file.", "req.date":"Please select a date.",
     "req.time":"Please select a time.", "req.dem":"Please select an elevation model.",
     "running":"Running…", "launcherr":"Launch error: ", "stopped":"⚠ Stopped",
+    "stopping":"⏳ Stopping…",
   },
 };
 let _lang = 'fr';
@@ -5706,14 +5798,15 @@ async function pollOnce() {
     if (_running && r && r.done) {
       _running = false;
       const code = r.code;
-      document.getElementById('log-status').textContent =
-        code === 0 ? t('done') : tf('err.code', {c: code});
-      document.getElementById('footer-status').textContent =
-        code === 0 ? t('done') : tf('err.code', {c: code});
-      setLogProgress(100, code === 0 ? 'ok' : 'err');
+      const stopped = (code === 130);   // annulation utilisateur, pas une erreur
+      const statusTxt = code === 0 ? t('done')
+                      : stopped ? t('stopped') : tf('err.code', {c: code});
+      document.getElementById('log-status').textContent = statusTxt;
+      document.getElementById('footer-status').textContent = statusTxt;
+      setLogProgress(100, code === 0 ? 'ok' : stopped ? '' : 'err');
       if (code === 0) {
         rafraichirHistorique();
-      } else {
+      } else if (!stopped) {
         // Forcer l'affichage du log en cas d'erreur
         const panLog = document.getElementById('panneau-log');
         if (panLog && panLog.classList.contains('hidden')) toggleLogPanel();
@@ -5793,10 +5886,14 @@ async function lancer() {
 }
 
 async function arreter() {
+  // Annulation coopérative : on laisse _running actif, pollOnce détectera la
+  // fin RÉELLE du thread (code 130) et réarmera les boutons. L'ancienne
+  // version réarmait immédiatement : relancer avant la fin du thread
+  // répondait « un calcul est déjà en cours ».
   try { await pywebview.api.stop(); } catch(e) {}
-  _running = false;
-  document.getElementById('footer-status').textContent = t('stopped');
-  btnReset();
+  document.getElementById('btn-stop').disabled = true;
+  document.getElementById('log-status').textContent = t('stopping');
+  document.getElementById('footer-status').textContent = t('stopping');
 }
 
 function btnReset() {
