@@ -27,6 +27,7 @@ Bootstrap des dépendances (style lidar2map) :
 #  BOOTSTRAP DES DÉPENDANCES (modes auto | pip | none — cf. lidar2map)
 # ====================================================================
 import subprocess
+import signal
 import sys
 import os
 import platform
@@ -1186,16 +1187,102 @@ class CalculationCancelled(Exception):
     pass
 
 
-# Annulation COOPÉRATIVE : le calcul est synchrone dans un thread, on ne peut
-# pas le tuer ; Api.stop() pose cet event et le calcul sort proprement au
-# prochain point de contrôle (batch de points, bloc de carte, tuile, chunk de
-# téléchargement) en levant CalculationCancelled. Api.launch() l'efface.
+# Arrêt : depuis v1.2.2 le calcul de la GUI tourne dans un SOUS-PROCESSUS
+# (mode headless relancé par Api.launch), tué net par Api.stop() via
+# _kill_process_tree — modèle identique au jumeau lidar2map. Un thread Python
+# ne se tue pas de l'extérieur ; un process, si. CANCEL_EVENT/check_cancelled
+# restent comme garde coopérative secondaire (cheap no-op tant que l'event
+# n'est pas posé) : utile si le moteur est piloté en direct hors GUI.
 CANCEL_EVENT = threading.Event()
 
 
 def check_cancelled():
     if CANCEL_EVENT.is_set():
         raise CalculationCancelled("stop requested")
+
+
+# ── Canal enfant → parent (ndjson) ────────────────────────────────────────────
+# Quand le moteur tourne comme sous-processus de la GUI (env GPXSOLAR_CHILD=1),
+# il renvoie logs et progression au parent en JSON-lines sur stdout : une ligne
+# = un dict {"line","tag"} ou {"progress":{"value","text"}}. Le parent
+# (Api._pump) relit ces lignes et alimente le panneau de log + la barre.
+# ndjson = protocole IPC parent/enfant standard. Spécialisation vs lidar2map
+# (qui parse du texte brut + '\r' de GDAL) : ici le moteur est du Python pur
+# avec un progress_callback structuré, donc on émet directement du structuré.
+_GUI_IPC_STREAM = None
+_GUI_IPC_LOCK = threading.Lock()
+
+
+def _gui_ipc_emit(obj: dict) -> None:
+    s = _GUI_IPC_STREAM
+    if s is None:
+        return
+    try:
+        with _GUI_IPC_LOCK:
+            s.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            s.flush()
+    except Exception:
+        pass
+
+
+def _install_gui_ipc_logging() -> None:
+    """Bascule le logging racine vers le canal ndjson (mode enfant de la GUI).
+    Frozen --windowed : sys.stdout peut être None, on rouvre le fd 1 (= le pipe
+    fourni par le parent)."""
+    global _GUI_IPC_STREAM
+    stream = sys.stdout
+    if stream is None:
+        stream = os.fdopen(1, "w", encoding="utf-8", buffering=1)
+        sys.stdout = stream
+    _GUI_IPC_STREAM = stream
+    tag_map = {"WARNING": "warn", "ERROR": "err", "CRITICAL": "err", "DEBUG": "dim"}
+
+    class _NdjsonLogHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                _gui_ipc_emit({"line": record.getMessage() + "\n",
+                               "tag": tag_map.get(record.levelname, "ok")})
+            except Exception:
+                pass
+
+    root = logging.getLogger()
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+        h.close()
+    root.addHandler(_NdjsonLogHandler())
+    root.setLevel(logging.INFO)
+
+
+def _kill_process_tree(proc) -> None:
+    """Kill forcé de toute la hiérarchie d'un sous-processus (Windows/Unix).
+    Repris tel quel du jumeau lidar2map (_kill_tree). taskkill /T tue l'arbre
+    (défensif : le moteur n'a que des threads, mais on reste symétrique) ;
+    killpg exige que le child ait été lancé avec start_new_session=True."""
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _headless_base_cmd() -> list:
+    """Commande de base pour relancer CE programme en mode headless.
+    Frozen (PyInstaller) : l'exe lui-même reçoit les arguments (le launcher
+    _loader.py les forwarde). Dev : python + le script."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
 
 # Lock du cache départements (l'ancien TZ_CACHE qu'il protégeait n'existait
 # plus ; seul get_department_from_coords l'utilise).
@@ -1574,7 +1661,11 @@ class VegetationManager:
             block_size = 8192
             downloaded_size = 0
 
-            with open(output_path, 'wb') as f:
+            # Écriture atomique : .part puis os.replace. Un kill du sous-processus
+            # (bouton Arrêter) en plein download ne laisse jamais un .tif tronqué
+            # que le prochain run prendrait pour un cache valide.
+            tmp_path = output_path + ".part"
+            with open(tmp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     check_cancelled()
                     f.write(chunk)
@@ -1582,16 +1673,17 @@ class VegetationManager:
                     if self.progress_callback and total_size > 0:
                         progress = (downloaded_size / total_size) * 100
                         self.progress_callback(50 + progress * 0.05, f"DL WorldCover {tile_name}: {progress:.1f}%")
+            os.replace(tmp_path, output_path)
 
             return self._load_single_tile(os.path.basename(output_path))
         except CalculationCancelled:
             # Arrêt utilisateur : purger le fichier partiel et PROPAGER
             # (le except Exception ci-dessous avalerait l'annulation).
-            if os.path.exists(output_path): os.remove(output_path)
+            if os.path.exists(output_path + ".part"): os.remove(output_path + ".part")
             raise
         except Exception as e:
             logging.error(f"Vegetation DL error: {e}")
-            if os.path.exists(output_path): os.remove(output_path)
+            if os.path.exists(output_path + ".part"): os.remove(output_path + ".part")
             return False
             
     def _load_tiles(self):
@@ -1798,12 +1890,22 @@ class LidarManager:
     MAX_CACHE_SIZE = 50  # Nombre max de tuiles en RAM par couche
     MAX_RETRIES = 3      # Nombre de tentatives de téléchargement
     
-    def __init__(self, log_func=print, progress_callback=None):
+    def __init__(self, log_func=print, progress_callback=None, *,
+                 layer_map=None, cache_dir="LIDAR_CACHE", cache_prefix="LIDAR",
+                 tile_px=2000):
+        # Paramétrable pour servir aussi le WMS RGE ALTI (mode ombre) : même
+        # lazy-load + cache LRU + échantillonnage, en changeant la couche
+        # (MNT seul), le répertoire/préfixe de cache (pas de collision avec les
+        # tuiles LiDAR HD) et la résolution pixel. Défauts = LiDAR HD inchangé.
         self.log = log_func
         self.progress_callback = progress_callback
-        self.rasters = {'mnt': LRUTileCache(max_size=self.MAX_CACHE_SIZE), 'mnh': LRUTileCache(max_size=self.MAX_CACHE_SIZE)}
+        self.layer_map = layer_map if layer_map is not None else dict(self.LAYER_MAP)
+        self.rasters = {k: LRUTileCache(max_size=self.MAX_CACHE_SIZE)
+                        for k in self.layer_map}
         self.transformer = TransformerPool.wgs84_to_lambert()
-        self.cache_dir = "LIDAR_CACHE"
+        self.cache_dir = cache_dir
+        self.cache_prefix = cache_prefix
+        self.tile_px = tile_px
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
         self.enabled = False
@@ -1955,7 +2057,7 @@ class LidarManager:
             True si téléchargement réussi ou fichier déjà présent
             False en cas d'échec après MAX_RETRIES tentatives
         """
-        layer_name = self.LAYER_MAP.get(key)
+        layer_name = self.layer_map.get(key)
         if not layer_name:
             self.log(f"❌ Error: Couche {key} non reconnue")
             return False
@@ -1964,21 +2066,21 @@ class LidarManager:
         y0 = ty * 1000
         tile_bbox = f"{x0},{y0},{x0+1000},{y0+1000}"
         
-        cache_filename = f"LIDAR_{key}_L93_1km_{tx}_{ty}.tif"
+        cache_filename = f"{self.cache_prefix}_{key}_L93_1km_{tx}_{ty}.tif"
         cache_path = os.path.join(self.cache_dir, cache_filename)
-        
+
         if os.path.exists(cache_path):
             self.downloaded_tiles.add((tx, ty)) # AJOUT: Ajouter la tuile à downloaded_tiles même si déjà présente
 
             return True
-        
+
         with self.lock:
             # Double-check après verrouillage
             if os.path.exists(cache_path):
                 self.downloaded_tiles.add((tx, ty)) # AJOUT: Ajouter la tuile à downloaded_tiles même si déjà présente
-    
+
                 return True
-            
+
             # Téléchargement avec retries
             params = {
                 'SERVICE': 'WMS',
@@ -1988,8 +2090,8 @@ class LidarManager:
                 'FORMAT': 'image/geotiff',
                 'CRS': 'EPSG:2154',
                 'BBOX': tile_bbox,
-                'WIDTH': 2000,
-                'HEIGHT': 2000,
+                'WIDTH': self.tile_px,
+                'HEIGHT': self.tile_px,
                 'STYLES': ''
             }
             
@@ -2013,9 +2115,13 @@ class LidarManager:
                         raise requests.exceptions.RequestException(
                             f"réponse WMS non-GeoTIFF : {head!r}")
 
-                    with open(cache_path, 'wb') as f:
+                    # Écriture atomique : .part puis os.replace (kill-safe, cf.
+                    # WorldCover). Une tuile présente est donc toujours complète.
+                    _tmp = cache_path + ".part"
+                    with open(_tmp, 'wb') as f:
                         f.write(response.content)
-                    
+                    os.replace(_tmp, cache_path)
+
                     self.log(f"  ✓ Tuile {tx},{ty} téléchargée")
 
                     self.downloaded_tiles.add((tx, ty)) # <-- Ceci est self.lidar_manager.downloaded_tiles
@@ -2049,11 +2155,14 @@ class LidarManager:
             if self.rasters[key].get(tile_id) is not None:
                 return True
             
-            cache_filename = f"LIDAR_{key}_L93_1km_{tx}_{ty}.tif"
+            cache_filename = f"{self.cache_prefix}_{key}_L93_1km_{tx}_{ty}.tif"
             cache_path = os.path.join(self.cache_dir, cache_filename)
             
             if not os.path.exists(cache_path):
-                self.log(f"🔄 Lazy download: Tuile ({key.upper()}) {tx},{ty} nécessaire pour raycasting...")
+                # Message générique : _load_tile_to_ram sert au raycasting d'ombre
+                # ET à l'échantillonnage d'altitude du MNT (calcul de pente). Dire
+                # « pour raycasting » induisait en erreur en mode pente.
+                self.log(f"🔄 Lazy download: Tuile ({key.upper()}) {tx},{ty} nécessaire au calcul...")
                 if not self._ensure_tile_downloaded(key, tx, ty):
                     self.log(f"  ⚠️ Échec lazy download pour {tx},{ty}. Altitude par défaut (0m).")
                     return False
@@ -2200,6 +2309,7 @@ class HGTDataManager:
 
         self.ign_grid_tiles = {}
         self.lidar_manager = None
+        self.wms_dem = None   # DEM WMS RGE ALTI (mode ombre, ign_rgealti/bdalti)
         self.elevation_cache = {}
         self.elevation_cache_lock = threading.Lock()
         
@@ -2220,7 +2330,20 @@ class HGTDataManager:
 
 
         if self.source == 'ign_lidar_hd':
-            self.lidar_manager = LidarManager(self.log, self.progress_callback) 
+            self.lidar_manager = LidarManager(self.log, self.progress_callback)
+        elif self.source in ('ign_rgealti_5m', 'ign_bdalti_25m'):
+            # DEM via le WMS Géoplateforme (couche ELEVATION.ELEVATIONGRIDCOVERAGE
+            # = RGE ALTI 1 m, altitude float brute) au lieu de l'archive .7z
+            # départementale (endpoint IGN mort depuis la migration cartes.gouv.fr).
+            # Tuiles paresseuses 1 km, mêmes rouages que LiDAR HD. Résolution pixel
+            # selon la source : 5 m (200 px/km) ou 25 m (40 px/km).
+            if not PYPROJ_AVAILABLE: raise MissingDataError("pyproj non installé.")
+            if not RASTERIO_AVAILABLE: raise MissingDataError("rasterio non installé.")
+            self.wms_dem = LidarManager(
+                self.log, self.progress_callback,
+                layer_map={'mnt': "ELEVATION.ELEVATIONGRIDCOVERAGE"},
+                cache_dir="RGEALTI_CACHE", cache_prefix="RGEALTI",
+                tile_px=200 if self.source == 'ign_rgealti_5m' else 40)
         elif self.source.startswith('ign_'):
             if not PYPROJ_AVAILABLE: raise MissingDataError("pyproj non installé.")
             # Transformer obtenu à la demande via TransformerPool (thread-local),
@@ -2343,10 +2466,79 @@ class HGTDataManager:
 
 
 
+    # Endpoint altimétrique Géoplateforme (RGE ALTI 1 m, France). API de POINTS :
+    # zéro téléchargement de tuile/raster, idéale pour la pente (on ne veut que
+    # l'altitude aux points de la trace). Même source que le script colorer_pente
+    # de Nico (module alti_ign). Ne remplace PAS le raster en mode ombre (le
+    # ray-tracing a besoin d'une grille autour de la trace).
+    GEOPF_ALTI_URL = "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json"
+    GEOPF_ALTI_RESOURCE = "ign_rge_alti_wld"   # RGE ALTI (LiDAR 1 m sur la France)
+    GEOPF_ALTI_MAXPTS = 5000                   # limite documentée du service
+    GEOPF_ALTI_NODATA = -99998.0               # l'API renvoie -99999 hors couverture
+
+    def _geopf_point_elevations(self, lats, lons):
+        """Altitude RGE ALTI 1 m via l'API altimétrique Géoplateforme (points).
+        POST par lots de 5000 (lat/lon pipe-délimités), `zonly`. Comble les
+        trous de couverture par interpolation linéaire ; lève MissingDataError
+        si l'API est injoignable ou la trace entièrement hors France."""
+        lats = np.asarray(lats, dtype=np.float64)
+        lons = np.asarray(lons, dtype=np.float64)
+        n = lats.size
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+        out = np.full(n, np.nan, dtype=np.float64)
+        try:
+            for start in range(0, n, self.GEOPF_ALTI_MAXPTS):
+                check_cancelled()
+                sl = slice(start, min(start + self.GEOPF_ALTI_MAXPTS, n))
+                # POST JSON obligatoire (le form-urlencoded renvoie 500, le GET
+                # plafonne sur la longueur d'URL). timeout=(connect, read).
+                resp = requests.post(self.GEOPF_ALTI_URL, json={
+                    'lon': '|'.join(f"{v:.6f}" for v in lons[sl]),
+                    'lat': '|'.join(f"{v:.6f}" for v in lats[sl]),
+                    'resource': self.GEOPF_ALTI_RESOURCE,
+                    'delimiter': '|',
+                    'zonly': 'true',
+                }, timeout=(10, 120))
+                resp.raise_for_status()
+                elevations = resp.json().get('elevations', [])
+                for j, z in enumerate(elevations):
+                    if isinstance(z, dict):
+                        z = z.get('z')
+                    if z is not None and float(z) > self.GEOPF_ALTI_NODATA:
+                        out[start + j] = float(z)
+                if self.progress_callback:
+                    self.progress_callback(
+                        min(40.0, 40.0 * (sl.stop / n)),
+                        f"Altitude RGE ALTI (API) : {sl.stop}/{n} points")
+        except CalculationCancelled:
+            raise
+        except Exception as e:
+            raise MissingDataError(
+                f"API altimétrique Géoplateforme indisponible : {e}. Réessayez, "
+                f"ou choisissez un DEM mondial (SRTM1/Copernicus) pour la pente.")
+        valid = ~np.isnan(out)
+        if not valid.any():
+            raise MissingDataError(
+                "Trace hors couverture RGE ALTI (hors France ?). Pour une pente "
+                "hors France, choisissez SRTM1 ou Copernicus comme DEM.")
+        if not valid.all():
+            idx = np.arange(n, dtype=np.float64)
+            out[~valid] = np.interp(idx[~valid], idx[valid], out[valid])
+            self.log(f"  {(~valid).sum()} point(s) hors couverture RGE ALTI "
+                     f"comblé(s) par interpolation.")
+        return out
+
     def get_ground_elevations_vec(self, lats, lons):
         """Méthode vectorielle pour l'altitude du sol."""
+        if getattr(self, 'use_geopf_point_alti', False):
+            # Mode pente : RGE ALTI 1 m par requête de points (aucune tuile).
+            return self._geopf_point_elevations(lats, lons)
         if self.lidar_manager:
             return self.lidar_manager.get_values_vec('mnt', lats, lons)
+        if self.wms_dem:
+            # Mode ombre RGE ALTI/BD ALTI : MNT via tuiles WMS Géoplateforme.
+            return self.wms_dem.get_values_vec('mnt', lats, lons)
         
         if self.source == 'srtm1' and self.srtm_data:
             elevs = [(self.srtm_data.get_elevation(lat, lon) or 0) for lat, lon in zip(lats, lons)]
@@ -2524,7 +2716,10 @@ class HGTDataManager:
             block_size = 8192 # 8KB
             downloaded_size = 0
 
-            with open(path, 'wb') as f:
+            # Écriture atomique : .part puis os.replace (kill-safe). Une archive
+            # présente est toujours complète, jamais tronquée par un Arrêter.
+            tmp_path = path + ".part"
+            with open(tmp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     check_cancelled()
                     f.write(chunk)
@@ -2532,19 +2727,20 @@ class HGTDataManager:
                     if self.progress_callback and total_size > 0:
                         progress = (downloaded_size / total_size) * 100
                         self.progress_callback(50 + progress * 0.05, f"DL IGN {os.path.basename(path)}: {progress:.1f}%")
+            os.replace(tmp_path, path)
 
         except CalculationCancelled:
             # Arrêt utilisateur : purger l'archive partielle et PROPAGER.
-            if os.path.exists(path):
-                os.remove(path)
+            if os.path.exists(path + ".part"):
+                os.remove(path + ".part")
             raise
         except Exception as e:
             logging.error(f"\n✗ IGN archive DL error: {e}")
             # Purger l'archive partielle : sinon prepare_*_data la voit
             # exister, saute le re-téléchargement et échoue en boucle sur la
             # décompression (même filet que Copernicus/WorldCover).
-            if os.path.exists(path):
-                os.remove(path)
+            if os.path.exists(path + ".part"):
+                os.remove(path + ".part")
     def _decompress_ign_archive(self, archive_path, dest_dir):
         if not PY7ZR_AVAILABLE:
             logging.error("✗ Error: py7zr not installed (pip install py7zr).")
@@ -3007,25 +3203,28 @@ class HGTDataManager:
             block_size = 8192 # 8KB
             downloaded_size = 0
 
-            with open(output_path, 'wb') as f: 
+            # Écriture atomique : .part puis os.replace (kill-safe). Une tuile
+            # présente est toujours complète, jamais tronquée par un Arrêter.
+            tmp_path = output_path + ".part"
+            with open(tmp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     f.write(chunk)
                     downloaded_size += len(chunk)
                     if self.progress_callback and total_size > 0:
                         progress = (55 + (downloaded_size / total_size) * 0.05) # De 55% à 60%
                         self.progress_callback(progress, f"DL Copernicus {filename}: {progress:.1f}%")
-            
+            os.replace(tmp_path, output_path)
 
             # Ajouter la tuile à downloaded_tiles_info ici, mais sans charger en RAM
             # Le _scan_copernicus_tiles au début du processus s'occupe de ça.
             # On pourrait le faire ici si on voulait une mise à jour immédiate
             # de downloaded_tiles_info, mais pour l'instant, c'est géré par le scan initial.
             return True
-            
+
         except Exception as e:
             logging.error(f"Copernicus download error: {e}")
-            if os.path.exists(output_path):
-                os.remove(output_path)
+            if os.path.exists(output_path + ".part"):
+                os.remove(output_path + ".part")
             return False
 
     def _ensure_copernicus_tile_metadata_loaded(self, lat, lon):
@@ -3306,9 +3505,46 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
     # cumul temporel via np.cumsum (séquentiel mais O(N) sans appel Python).
     slope_ratios = np.zeros(totalpoints, dtype=np.float64)
     if totalpoints >= 2:
-        elev_diff = allelevations[1:] - allelevations[:-1]
-        safe_dists = np.where(seg_dists_m[:-1] > 0.0, seg_dists_m[:-1], 1.0)
-        slope_ratios[:-1] = np.where(seg_dists_m[:-1] > 0.0, elev_diff / safe_dists, 0.0)
+        # Fenêtre de lissage en distance (mode pente) : la pente entre deux
+        # points GPS consécutifs (souvent 1-3 m) est dominée par le bruit
+        # d'échantillonnage du MNT. On la mesure sur une sécante de
+        # `analysis_resolution` mètres — idée reprise de colorer_pente (lissage
+        # EN DISTANCE, insensible à la densité variable des points GPS). En mode
+        # ombre on garde le calcul point-à-point historique : Tobler inchangé,
+        # run témoin bit-identique.
+        window_m = float(getattr(hgtmanager, "analysis_resolution", 0.0) or 0.0)
+        if (not compute_shadows) and window_m > 0.0:
+            # Pipeline de colorer_pente (les deux étapes, fenêtre EN DISTANCE,
+            # insensible à la densité des points GPS) :
+            #  1. lisser l'ALTITUDE par moyenne glissante (lisser_en_distance) ;
+            #  2. pente = SÉCANTE sur la fenêtre du profil lissé (pentes_en_distance).
+            # Dériver un profil lissé par une sécante (et non point-à-point sur
+            # ~10 m) donne un lissage MONOTONE : une fenêtre plus large réduit
+            # toujours le bruit. En mode ombre : calcul point-à-point historique
+            # (Tobler inchangé, run témoin bit-identique).
+            cumdist = np.concatenate(([0.0], np.cumsum(seg_dists_m[:-1])))
+            half = max(window_m / 2.0, 1.0)
+            # 1. altitude lissée
+            a1 = np.searchsorted(cumdist, cumdist - half, side='left')
+            b1 = np.searchsorted(cumdist, cumdist + half, side='right')
+            prefix = np.concatenate(([0.0], np.cumsum(allelevations)))
+            elev_s = (prefix[b1] - prefix[a1]) / np.maximum(b1 - a1, 1)
+            # 2. sécante sur la fenêtre ; repli i-1,i+1 si la fenêtre est plus
+            # courte que l'espacement (sinon a==b -> pente nulle partout).
+            a2 = np.clip(a1, 0, totalpoints - 1)
+            b2 = np.clip(b1 - 1, 0, totalpoints - 1)
+            idx = np.arange(totalpoints)
+            collapsed = b2 <= a2
+            a2 = np.where(collapsed, np.maximum(idx - 1, 0), a2)
+            b2 = np.where(collapsed, np.minimum(idx + 1, totalpoints - 1), b2)
+            dd = cumdist[b2] - cumdist[a2]
+            slope_ratios = np.where(dd > 0.0,
+                                    (elev_s[b2] - elev_s[a2]) / np.where(dd > 0.0, dd, 1.0),
+                                    0.0)
+        else:
+            elev_diff = allelevations[1:] - allelevations[:-1]
+            safe_dists = np.where(seg_dists_m[:-1] > 0.0, seg_dists_m[:-1], 1.0)
+            slope_ratios[:-1] = np.where(seg_dists_m[:-1] > 0.0, elev_diff / safe_dists, 0.0)
 
     seg_slopes_percent = slope_ratios * 100.0
 
@@ -3954,7 +4190,7 @@ def extend_to_sun(lat, lon, alt, sun_az, sun_alt):
 
     return lon2, lat2, alt2
 
-def create_kml_file(original_path, processed_data, passage_interval_min=0, local_tz=None, hgt_manager=None, visualize_tiles=False, visualize_sun_rays=False, sun_ray_interval=20, analysis_type='ombre_soleil'):
+def create_kml_file(original_path, processed_data, passage_interval_min=0, local_tz=None, hgt_manager=None, visualize_tiles=False, visualize_sun_rays=False, sun_ray_interval=20, analysis_type='ombre_soleil', show_slope_arrows=False):
     if not SIMPLEKML_AVAILABLE:
         logging.error("The 'simplekml' library is required to create KML files.")
         return None
@@ -4090,9 +4326,11 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                 linestring = multigeo.newlinestring(coords=coords)
                 linestring.altitudemode = simplekml.AltitudeMode.clamptoground
 
-                # --- Nouvelle logique pour les flèches ---
-                # Placer une flèche au milieu de chaque segment de couleur continue
-                if len(coords) > 2:
+                # Flèches de sens de parcours (chevron au milieu de chaque
+                # segment coloré). Optionnel : la palette de pente est en valeur
+                # ABSOLUE (ne distingue pas montée/descente), la flèche est donc
+                # la seule indication de direction — mais décochée par défaut.
+                if show_slope_arrows and len(coords) > 2:
                     mid_index = len(coords) // 2
                     p1_coords = coords[mid_index -1]
                     p2_coords = coords[mid_index]
@@ -4121,25 +4359,13 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                     end_lat1, end_lon1 = calculate_destination(mid_lat, mid_lon, bearing1, ARROW_LENGTH)
                     end_lat2, end_lon2 = calculate_destination(mid_lat, mid_lon, bearing2, ARROW_LENGTH)
 
-                    # Obtenir l'altitude du terrain pour les extrémités des flèches
-                    arrow_lats = np.array([mid_lat, end_lat1, end_lat2]) # Inclure mid_lat pour le point de départ de la flèche
-                    arrow_lons = np.array([mid_lon, end_lon1, end_lon2]) # Inclure mid_lon
-                    
-                    # Utiliser get_ground_elevations_vec pour obtenir toutes les altitudes d'un coup
-                    # S'assurer que hgt_manager est disponible et non None
-                    if hgt_manager:
-                        all_arrow_elevs = hgt_manager.get_ground_elevations_vec(arrow_lats, arrow_lons)
-                        mid_elev_terrain = all_arrow_elevs[0] # Altitude du terrain au centre du segment
-                        end_elev1_terrain = all_arrow_elevs[1]
-                        end_elev2_terrain = all_arrow_elevs[2]
-                    else: # Fallback si hgt_manager n'est pas fourni (ne devrait pas arriver en pratique ici)
-                        mid_elev_terrain = (p1_coords[2] + p2_coords[2]) / 2 # Fallback to GPX elevation if no hgt_manager
-                        end_elev1_terrain = (p1_coords[2] + p2_coords[2]) / 2
-                        end_elev2_terrain = (p1_coords[2] + p2_coords[2]) / 2
-
-                    # Créer les flèches à la racine du KML avec les altitudes corrigées et clampToGround
-                    ls1 = kml.newlinestring(coords=[(mid_lon, mid_lat, mid_elev_terrain), (end_lon1, end_lat1, end_elev1_terrain)])
-                    ls2 = kml.newlinestring(coords=[(mid_lon, mid_lat, mid_elev_terrain), (end_lon2, end_lat2, end_elev2_terrain)])
+                    # Flèches en clampToGround (cf. altitudemode ci-dessous) : le
+                    # renderer plaque au sol et IGNORE la composante z. Inutile donc
+                    # d'échantillonner l'altitude du terrain — c'était 1 appel PAR
+                    # flèche, soit ~100 POST à l'API altimétrique en mode pente
+                    # (les 103 s observées). z=0 est strictement équivalent à l'écran.
+                    ls1 = kml.newlinestring(coords=[(mid_lon, mid_lat, 0), (end_lon1, end_lat1, 0)])
+                    ls2 = kml.newlinestring(coords=[(mid_lon, mid_lat, 0), (end_lon2, end_lat2, 0)])
                     
                     ls1.altitudemode = simplekml.AltitudeMode.clamptoground
                     ls2.altitudemode = simplekml.AltitudeMode.clamptoground
@@ -4415,7 +4641,7 @@ def profile_run_gui_process(*args_for_run_gui_process, **kwargs_for_run_gui_proc
     
     return result
 
-def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resolution, max_distance, shadow_mode, direction, open_gpx_after_calc, tz_finder, output_default, log_func, progress_callback, args, batch_size, passage_interval_min, solar_step_s, visualize_tiles, generate_shadow_map=False, num_workers=4, margin_meters=500, visualize_sun_rays=False, sun_ray_interval=20, analysis_type='ombre_soleil'):
+def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resolution, max_distance, shadow_mode, direction, open_gpx_after_calc, tz_finder, output_default, log_func, progress_callback, args, batch_size, passage_interval_min, solar_step_s, visualize_tiles, generate_shadow_map=False, num_workers=4, margin_meters=500, visualize_sun_rays=False, sun_ray_interval=20, analysis_type='ombre_soleil', show_slope_arrows=False):
 
     try:
 
@@ -4432,8 +4658,14 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         # WorldCover (~1 GB/tuile), ni corridor solaire LiDAR (dizaines de
         # tuiles MNT+MNH) — sauf si la carte d'ombre est aussi demandée. Le
         # ray-tracing de la trace n'a de sens qu'en analyse ombre/soleil.
-        want_shadow_data = (analysis_type == 'ombre_soleil') or generate_shadow_map
         compute_shadows = (analysis_type == 'ombre_soleil')
+        # Mode pente = coloration de la trace uniquement. On force l'absence de
+        # toute donnée d'ombre, même si « Générer carte d'ombre » était resté
+        # coché : sinon on retéléchargerait tuiles LiDAR + végétation pour rien
+        # (c'était le bug « la pente télécharge les tuiles »).
+        if analysis_type == 'pente':
+            generate_shadow_map = False
+        want_shadow_data = compute_shadows or generate_shadow_map
 
         veg_manager = None
         # Le LiDAR HD inclut déjà la végétation (MNH), donc on n'active le
@@ -4473,7 +4705,16 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
             except Exception as e:
                 log_func(f"Warning: error determining timezone. Using UTC. Error: {e}")
 
-        if hgt_manager.source == 'ign_lidar_hd':
+        if analysis_type == 'pente' and dem_source.startswith('ign_'):
+            # Mode pente + source IGN : altitude MNT via l'API altimétrique
+            # Géoplateforme (RGE ALTI 1 m, requête de points) — zéro download de
+            # tuile ni d'archive. Remplace le préchargement corridor (LiDAR) et
+            # le download d'archive départementale RGE ALTI/BD ALTI (endpoint
+            # mort depuis la migration IGN vers cartes.gouv.fr).
+            hgt_manager.use_geopf_point_alti = True
+            log_func("Mode pente : altitude MNT via l'API RGE ALTI 1 m "
+                     "(Géoplateforme, points), sans téléchargement de tuile.")
+        elif hgt_manager.source == 'ign_lidar_hd':
             if want_shadow_data:
                 hgt_manager.prepare_lidar_data(points, start_dt_naive)
             else:
@@ -4481,6 +4722,11 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 # tuiles MNT sous la trace seront lazy-chargées par le calcul.
                 log_func("Slope-only analysis: solar-corridor tile preload skipped "
                          "(MNT lazy-loaded along the track).")
+        elif hgt_manager.wms_dem is not None:
+            # RGE ALTI / BD ALTI en ombre : MNT via tuiles WMS paresseuses
+            # (aucune archive à télécharger, endpoint .7z mort). Rien à préparer.
+            log_func("Ombre RGE ALTI/BD ALTI : MNT via WMS Géoplateforme "
+                     "(couche ELEVATION.ELEVATIONGRIDCOVERAGE, tuiles à la demande).")
         elif hgt_manager.source.startswith('ign_'):
              # Logique département pour BD ALTI...
             department = get_department_from_coords(points[0].latitude, points[0].longitude)
@@ -4529,9 +4775,10 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 local_tz=local_tz_for_trace, hgt_manager=hgt_manager, 
                 visualize_tiles=visualize_tiles, visualize_sun_rays=visualize_sun_rays, 
                 sun_ray_interval=sun_ray_interval,
-                analysis_type=analysis_type
+                analysis_type=analysis_type,
+                show_slope_arrows=show_slope_arrows
             )
-            
+
             shadow_map_tif_path = None # Initialiser ici
             # Étape 2: Décider de la sauvegarde (fusion ou KML seul)
             if generate_shadow_map:
@@ -4660,7 +4907,7 @@ def show_form(args, tz_finder, output_default):
 
     # Alignée sur --version (l'ancien "v28.5" était un compteur interne
     # divergent de la version publiée).
-    APP_VERSION = "v1.2.1"
+    APP_VERSION = "v1.3.0"
     config = load_config()
 
     # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
@@ -4750,15 +4997,24 @@ def show_form(args, tz_finder, output_default):
         'num_workers': str(config.get('num_workers', DEFAULT_NUM_WORKERS)),
         'visualize_sun_rays': bool(config.get('visualize_sun_rays', False)),
         'sun_ray_interval': str(config.get('sun_ray_interval', '20')),
+        'show_slope_arrows': bool(config.get('show_slope_arrows', False)),
     }
 
     class Api:
+        # Le calcul tourne dans un SOUS-PROCESSUS (ce programme relancé en mode
+        # headless), tué net par stop() → bouton Arrêter = kill immédiat. Modèle
+        # identique au jumeau lidar2map (subprocess + _kill_tree + thread lecteur
+        # du stdout). Un thread Python ne se tue pas ; un process, si.
         def __init__(self):
-            self._thread = None
+            self._proc = None
+            self._reader_t = None
+            self._stopped = False        # True entre le clic Arrêter et la mort du child
             self._done = False
             self._retcode = None
             self._last_error = ""
             self._progress = {"value": 0, "text": "En attente..."}
+            self._t_launch = None
+            self._cfg_launch = None
             self.window = None
 
         def _get_window(self):
@@ -4808,19 +5064,68 @@ def show_form(args, tz_finder, output_default):
             return {"msg": self._last_error or "", "retcode": self._retcode or 0}
 
         def stop(self):
-            # Annulation coopérative : on pose l'event, le calcul lève
-            # CalculationCancelled au prochain point de contrôle (batch,
-            # bloc, tuile, chunk) et run() se termine → _done passe à True.
-            # L'ancienne version posait _done=True SANS arrêter le thread :
-            # l'UI se libérait mais launch() répondait ensuite « un calcul
-            # est déjà en cours » tant que le thread vivait.
-            CANCEL_EVENT.set()
-            log_queue.put({"line": "\n⚠ Arrêt demandé - sortie au prochain point de contrôle...\n",
+            """Arrêt IMMÉDIAT : kill de tout l'arbre du sous-processus. Pas de
+            grâce (contrairement à lidar2map) : les écritures de cache sont
+            atomiques (.part + rename), donc un kill sec ne corrompt rien. Le
+            thread lecteur pose _done quand le pipe se ferme."""
+            proc = self._proc
+            if not (proc and proc.poll() is None):
+                return
+            self._stopped = True
+            log_queue.put({"line": "\n■ Arrêt demandé - calcul tué immédiatement.\n",
                            "tag": "warn"})
+            _kill_process_tree(proc)
+
+        def _headless_cmd(self, c):
+            """Construit la ligne de commande headless équivalente à la config GUI."""
+            cmd = _headless_base_cmd() + [
+                "--gpx", c['gpx_file'],
+                "--date", c['date'],
+                "--time", c['time'],
+                "--dem-source", c['dem_source'],
+                "--analysis-resolution", str(c['analysis_resolution']),
+                "--max-shadow-distance", str(c['max_distance']),
+                "--shadow-mode", c['shadow_mode'],
+                "--direction", c['direction'],
+                "--analysis-type", c['analysis_type'],
+                "--batch-size", str(c['batch_size']),
+                "--solar-step-s", str(c['solar_step_s']),
+                "--num-workers", str(c['num_workers']),
+                "--margin-meters", str(c['margin_meters']),
+                "--sun-ray-interval", str(c['sun_ray_interval']),
+                "--passage-interval-min", str(c['passage_interval_min']),
+                "--output", args.output,
+                "--hgt-dir", args.hgt_dir,
+                "--vegetation-dir", args.vegetation_dir,
+                "--interpolation", args.interpolation,
+            ]
+            if c.get('open_gpx'):            cmd.append("--open")
+            if c.get('visualize_tiles'):     cmd.append("--visualize-tiles")
+            if c.get('generate_shadow_map'): cmd.append("--generate-shadow-map")
+            if c.get('visualize_sun_rays'):  cmd.append("--visualize-sun-rays")
+            if c.get('show_slope_arrows'):   cmd.append("--show-slope-arrows")
+            if getattr(args, 'no_download_vegetation', False): cmd.append("--no-download-vegetation")
+            if getattr(args, 'no_vegetation_shadow', False):   cmd.append("--no-vegetation-shadow")
+            if getattr(args, 'profile', False):                cmd.append("--profile")
+            return cmd
 
         def launch(self, cfg):
-            if self._thread and self._thread.is_alive():
-                return {"error": "Un calcul est déjà en cours."}
+            proc = self._proc
+            if proc and proc.poll() is None:
+                if not self._stopped:
+                    return {"error": "Un calcul est déjà en cours."}
+                # Arrêter puis Lancer = intention sans ambiguïté : on tue
+                # immédiatement l'ancien run et on attend brièvement sa mort.
+                _kill_process_tree(proc)
+                try:
+                    proc.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    return {"error": "Arrêt encore en cours, réessayez dans un instant."}
+            # Laisser le thread lecteur de l'ANCIEN run finir (son finally pose
+            # _done=True et écraserait le _done=False du nouveau run). Le pipe
+            # étant clos par la mort du process, il sort en quelques ms.
+            if self._reader_t and self._reader_t.is_alive():
+                self._reader_t.join(timeout=5)
 
             f = (cfg.get("gpx_file") or "").strip()
             d = (cfg.get("date") or "").strip()
@@ -4850,12 +5155,13 @@ def show_form(args, tz_finder, output_default):
                     'num_workers': str(cfg.get('num_workers', DEFAULT_NUM_WORKERS)),
                     'visualize_sun_rays': bool(cfg.get('visualize_sun_rays', False)),
                     'sun_ray_interval': str(cfg.get('sun_ray_interval', '20')),
+                    'show_slope_arrows': bool(cfg.get('show_slope_arrows', False)),
                 }
                 save_config(new_config)
             except Exception as e:
                 return {"error": f"Erreur paramètres : {e}"}
 
-            CANCEL_EVENT.clear()   # réarme après un éventuel arrêt précédent
+            self._stopped = False
             self._done = False
             self._retcode = None
             self._last_error = ""
@@ -4868,70 +5174,97 @@ def show_form(args, tz_finder, output_default):
                 except queue.Empty:
                     break
 
-            def log_func(msg):
-                logging.info(msg)
+            cmd = self._headless_cmd(new_config)
+            env = os.environ.copy()
+            env["GPXSOLAR_CHILD"] = "1"          # bascule le child en canal ndjson
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"    # accents propres dans le pipe
+            log_queue.put({"line": "$ " + " ".join(str(x) for x in cmd) + "\n\n", "tag": "dim"})
+            try:
+                if os.name == "nt":
+                    # CREATE_NO_WINDOW : pas de console qui clignote (utile en dev,
+                    # où le child est python.exe). Le stdout part dans notre pipe.
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                        env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+                else:
+                    # start_new_session : groupe de process dédié pour killpg.
+                    self._proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                        env=env, start_new_session=True)
+            except Exception as e:
+                self._done = True
+                self._retcode = 1
+                self._last_error = f"Lancement impossible : {e}"
+                return {"error": self._last_error}
 
-            def progress_cb(value, text=""):
+            self._reader_t = threading.Thread(target=self._pump, daemon=True)
+            self._reader_t.start()
+            return {"ok": True}
+
+        def _consume_line(self, line):
+            """Une ligne ndjson du child → item de log ou mise à jour de la barre."""
+            try:
+                obj = json.loads(line)
+            except Exception:
+                # Ligne non-JSON (traceback brut, print direct d'une lib) :
+                # l'afficher telle quelle plutôt que la perdre.
+                is_err = ("Error" in line or "Traceback" in line or "error:" in line)
+                log_queue.put({"line": line + "\n", "tag": "err" if is_err else "ok"})
+                return
+            if not isinstance(obj, dict):
+                return
+            if "progress" in obj:
+                pr = obj["progress"] or {}
                 try:
-                    self._progress = {"value": float(value), "text": str(text)}
+                    self._progress = {"value": float(pr.get("value", 0)),
+                                      "text": str(pr.get("text", ""))}
                 except Exception:
                     pass
+            elif "line" in obj:
+                tag = obj.get("tag", "ok")
+                if tag == "err":
+                    self._last_error = obj["line"].strip()
+                log_queue.put({"line": obj["line"], "tag": tag})
 
-            def run():
+        def _pump(self):
+            """Thread lecteur : draine le stdout ndjson du child jusqu'à EOF,
+            puis finalise l'état (code de sortie, historique)."""
+            proc = self._proc
+            try:
+                for line in proc.stdout:
+                    line = line.rstrip("\r\n")
+                    if line:
+                        self._consume_line(line)
+            except Exception:
+                pass
+            try:
+                rc = proc.wait()
+            except Exception:
+                rc = -1
+            if self._stopped:
+                # 130 = convention SIGINT ; le JS l'affiche « Arrêté ».
+                self._retcode = 130
+                self._progress = {"value": 100, "text": "Stopped"}
+                log_queue.put({"line": "\n■ Calcul arrêté.\n", "tag": "warn"})
+            elif rc == 0:
+                self._retcode = 0
+                self._progress = {"value": 100, "text": "Done"}
+                log_queue.put({"line": "\n✓ Calcul terminé.\n", "tag": "ok"})
                 try:
-                    log_func("----------------------------------------------------------------------")
-                    log_func("Starting computation...")
-                    runner = profile_run_gui_process if args.profile else run_gui_process
-                    if args.profile:
-                        log_func("--- PROFILING ENABLED (full processing) ---")
-                    runner(
-                        f, d, t,
-                        new_config['dem_source'],
-                        new_config['analysis_resolution'],
-                        float(new_config['max_distance']),
-                        new_config['shadow_mode'],
-                        new_config['direction'],
-                        new_config['open_gpx'],
-                        tz_finder, args.output,
-                        log_func, progress_cb, args,
-                        int(new_config['batch_size']),
-                        int(new_config['passage_interval_min']),
-                        int(new_config['solar_step_s']),
-                        new_config['visualize_tiles'],
-                        new_config['generate_shadow_map'],
-                        int(new_config['num_workers']),
-                        int(new_config['margin_meters']),
-                        new_config['visualize_sun_rays'],
-                        int(new_config['sun_ray_interval']),
-                        new_config['analysis_type'],
-                    )
-                    self._retcode = 0
-                    self._progress = {"value": 100, "text": "Done"}
-                    log_func("✓ Computation completed successfully.")
-                    try:
-                        duree = (datetime.now() - self._t_launch).total_seconds()
-                        save_history(self._cfg_launch, duree, args.output)
-                        log_func(f"  History saved ({HISTORY_FILE}).")
-                    except Exception as he:
-                        log_func(f"  History not saved: {he}")
-                except CalculationCancelled:
-                    # 130 = convention Unix (SIGINT) ; le JS l'affiche comme
-                    # « Arrêté », pas comme une erreur.
-                    self._retcode = 130
-                    self._progress = {"value": 100, "text": "Stopped"}
-                    log_func("⚠ Calcul arrêté par l'utilisateur.")
-                except Exception as e:
-                    self._last_error = f"{type(e).__name__}: {e}"
-                    self._retcode = 1
-                    log_func(f"FATAL ERROR: {e}")
-                    traceback.print_exc()
-                finally:
-                    self._done = True
-                    log_func("----------------------------------------------------------------------")
-
-            self._thread = threading.Thread(target=run, daemon=True)
-            self._thread.start()
-            return {"ok": True}
+                    duree = (datetime.now() - self._t_launch).total_seconds()
+                    save_history(self._cfg_launch, duree, args.output)
+                    log_queue.put({"line": f"  Historique enregistré ({HISTORY_FILE}).\n", "tag": "ok"})
+                except Exception as he:
+                    log_queue.put({"line": f"  Historique non enregistré : {he}\n", "tag": "warn"})
+            else:
+                self._retcode = rc if rc else 1
+                if not self._last_error:
+                    self._last_error = f"Le calcul s'est terminé avec le code {self._retcode}."
+                log_queue.put({"line": f"\n✗ Échec (code {self._retcode}).\n", "tag": "err"})
+            self._done = True
 
     api = Api()
 
@@ -5005,8 +5338,28 @@ def show_form(args, tz_finder, output_default):
         zoomable=True,
     )
     api.window = win
+
+    def _au_close():
+        """Fermeture de la fenêtre : tuer un calcul encore en cours pour ne pas
+        laisser un sous-processus headless orphelin (mêmes raisons que le jumeau
+        lidar2map : sous Qt, webview.start() peut ne pas rendre la main)."""
+        try:
+            proc = getattr(api, "_process", None) or getattr(api, "_proc", None)
+            if proc and proc.poll() is None:
+                api.stop()
+                try:
+                    proc.wait(timeout=8)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    win.events.closed += _au_close
     # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12). Via --debug.
     webview.start(debug=bool(getattr(args, "debug", False)))
+    # Filet : si l'événement `closed` n'a pas été délivré mais que start() rend
+    # la main, on repasse par le même chemin d'extinction.
+    _au_close()
 
 
 def _build_gpxsolar_html():
@@ -5062,6 +5415,14 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:13px var(
 .row label.lbl{font-size:11px;color:var(--dim);white-space:nowrap;min-width:170px}
 .row label.lbl.short{min-width:100px}
 .row label.lbl.tiny{min-width:60px}
+/* Champs liés au calcul d'ombre : masqués en mode « Pente depuis MNT ».
+   .fld = display:contents → le span est transparent au flex (label + input
+   restent des items directs de la .row) tant qu'il n'est pas masqué. */
+.fld{display:contents}
+body.mode-pente .shadow-only{display:none!important}
+/* .slope-only = l'inverse : visible UNIQUEMENT en mode pente (masqué en ombre). */
+.slope-only{display:none}
+body.mode-pente .slope-only{display:flex}
 input[type=text],input[type=number],input[type=date],input[type=time],select{
   background:var(--bg3);border:1px solid var(--bd);border-radius:4px;
   color:var(--fg);padding:3px 7px;font:12px var(--fnt);outline:none;
@@ -5214,46 +5575,19 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
    </div>
   </div>
 
-  <!-- Options de simulation (numériques) -->
-  <div class="section sec-params">
-   <div class="section-hd" data-i18n="sec.params">Options de simulation</div>
-   <div class="section-body">
-    <div class="row">
-      <label class="lbl" data-i18n="f.res">Résolution analyse (m)</label>
-      <input type="number" id="f-analysis-resolution" step="0.5" min="0.5" class="inp-short">
-      <label class="lbl short" style="margin-left:14px" data-i18n="f.maxdist">Distance max. ombre (m)</label>
-      <input type="number" id="f-max-distance" step="100" min="100" class="inp-short">
-      <label class="lbl short" style="margin-left:14px" data-i18n="f.margin">Marge bbox (m)</label>
-      <input type="number" id="f-margin-meters" step="100" min="0" class="inp-short">
-    </div>
-    <div class="row">
-      <label class="lbl" data-i18n="f.batch">Taille des lots (batch)</label>
-      <input type="number" id="f-batch-size" step="1" min="1" class="inp-short">
-      <label class="lbl short" style="margin-left:14px" data-i18n="f.workers">Workers (parallèle)</label>
-      <input type="number" id="f-num-workers" step="1" min="1" max="32" class="inp-short">
-      <label class="lbl short" style="margin-left:14px" data-i18n="f.ptint">Intervalle pts (min)</label>
-      <input type="number" id="f-passage-interval" step="1" min="0" class="inp-short">
-      <span class="hint" data-i18n="hint.none">0 = aucun</span>
-    </div>
-    <div class="row">
-      <label class="lbl" data-i18n="f.solarstep">Pas solaire (s) — cache</label>
-      <select id="f-solar-step" class="inp-short">
-        <option value="10">10</option>
-        <option value="30">30</option>
-        <option value="60">60</option>
-        <option value="120">120</option>
-        <option value="300">300</option>
-      </select>
-      <span class="hint" data-i18n="hint.solarstep">Ex : 60 (rapide), 10 (précis)</span>
-    </div>
-   </div>
-  </div>
-
-  <!-- Modes -->
+  <!-- Modes (déplacé sous le DEM : on choisit d'abord le type d'analyse ;
+       la 2e ligne, liée à l'ombre, se masque en mode Pente) -->
   <div class="section sec-modes">
-   <div class="section-hd">Modes</div>
+   <div class="section-hd" data-i18n="sec.modes">Modes</div>
    <div class="section-body">
     <div class="row">
+      <label class="lbl" data-i18n="f.kmltype">Type d'analyse KML</label>
+      <div class="seg">
+        <input type="radio" name="analysis" id="an-ombre" value="ombre_soleil"><label for="an-ombre" data-i18n="an.ombre">Ombre / Soleil</label>
+        <input type="radio" name="analysis" id="an-pente" value="pente"><label for="an-pente" data-i18n="an.pente">Pente (depuis MNT)</label>
+      </div>
+    </div>
+    <div class="row shadow-only">
       <label class="lbl" data-i18n="f.shadowcalc">Calcul d'ombre</label>
       <div class="seg">
         <input type="radio" name="shadow" id="sh-relief" value="relief"><label for="sh-relief" data-i18n="sh.relief">Relief seul</label>
@@ -5267,12 +5601,44 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
         <input type="radio" name="direction" id="di-both" value="both"><label for="di-both" data-i18n="both">Les deux</label>
       </div>
     </div>
+    <div class="row slope-only">
+      <label class="cb"><input type="checkbox" id="f-show-slope-arrows"> <span data-i18n="f.slopearrows">Flèches de sens sur la trace</span></label>
+    </div>
+   </div>
+  </div>
+
+  <!-- Options de simulation (numériques) -->
+  <div class="section sec-params">
+   <div class="section-hd" data-i18n="sec.params">Options de simulation</div>
+   <div class="section-body">
     <div class="row">
-      <label class="lbl" data-i18n="f.kmltype">Type d'analyse KML</label>
-      <div class="seg">
-        <input type="radio" name="analysis" id="an-ombre" value="ombre_soleil"><label for="an-ombre" data-i18n="an.ombre">Ombre / Soleil</label>
-        <input type="radio" name="analysis" id="an-pente" value="pente"><label for="an-pente" data-i18n="an.pente">Pente (depuis MNT)</label>
-      </div>
+      <label class="lbl" data-i18n="f.res">Résolution analyse (m)</label>
+      <input type="number" id="f-analysis-resolution" step="0.5" min="0.5" class="inp-short">
+      <span class="hint slope-only" data-i18n="hint.slopewin">= fenêtre de lissage de la pente</span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.maxdist">Distance max. ombre (m)</label>
+      <input type="number" id="f-max-distance" step="100" min="100" class="inp-short"></span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.margin">Marge bbox (m)</label>
+      <input type="number" id="f-margin-meters" step="100" min="0" class="inp-short"></span>
+    </div>
+    <div class="row">
+      <span class="fld shadow-only"><label class="lbl" data-i18n="f.batch">Taille des lots (batch)</label>
+      <input type="number" id="f-batch-size" step="1" min="1" class="inp-short"></span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.workers">Workers (parallèle)</label>
+      <input type="number" id="f-num-workers" step="1" min="1" max="32" class="inp-short"></span>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.ptint">Intervalle pts (min)</label>
+      <input type="number" id="f-passage-interval" step="1" min="0" class="inp-short">
+      <span class="hint" data-i18n="hint.none">0 = aucun</span>
+    </div>
+    <div class="row shadow-only">
+      <label class="lbl" data-i18n="f.solarstep">Pas solaire (s) — cache</label>
+      <select id="f-solar-step" class="inp-short">
+        <option value="10">10</option>
+        <option value="30">30</option>
+        <option value="60">60</option>
+        <option value="120">120</option>
+        <option value="300">300</option>
+      </select>
+      <span class="hint" data-i18n="hint.solarstep">Ex : 60 (rapide), 10 (précis)</span>
     </div>
    </div>
   </div>
@@ -5284,9 +5650,9 @@ body.log-resizing,body.log-resizing *{user-select:none!important;cursor:ns-resiz
     <div class="cb-group">
       <label><input type="checkbox" id="f-open-gpx"> <span data-i18n="out.openkml">Ouvrir le KML résultat après calcul</span></label>
       <label><input type="checkbox" id="f-visualize-tiles"> <span data-i18n="out.tiles">Visualiser les tuiles (KML)</span></label>
-      <label><input type="checkbox" id="f-generate-shadow-map"> <span data-i18n="out.shadowmap">Générer carte d'ombre (GeoTIFF)</span></label>
+      <label class="shadow-only"><input type="checkbox" id="f-generate-shadow-map"> <span data-i18n="out.shadowmap">Générer carte d'ombre (GeoTIFF)</span></label>
     </div>
-    <div class="row">
+    <div class="row shadow-only">
       <label class="cb"><input type="checkbox" id="f-visualize-sun-rays"> <span data-i18n="out.sunrays">Visualiser rayons solaires (KML)</span></label>
       <label class="lbl tiny" style="margin-left:14px" data-i18n="f.rayint">Intervalle rayons</label>
       <input type="number" id="f-sun-ray-interval" step="1" min="1" class="inp-short">
@@ -5372,6 +5738,7 @@ const I18N = {
     "btn.run":"▶ Lancer le calcul", "btn.stop":"■ Arrêter", "btn.help":"? Aide", "btn.hist":"⏱ Historique",
     "sec.file":"Fichier GPX & date", "sec.dem":"Modèle de données d'altitude (DEM)",
     "sec.params":"Options de simulation", "sec.out":"Sorties & visualisations", "sec.legend":"Légendes",
+    "sec.modes":"Modes",
     "f.gpx":"Fichier GPX", "f.date":"Date de départ", "f.time":"Heure",
     "f.res":"Résolution analyse (m)", "f.maxdist":"Distance max. ombre (m)", "f.margin":"Marge bbox (m)",
     "f.batch":"Taille des lots (batch)", "f.workers":"Workers (parallèle)", "f.ptint":"Intervalle pts (min)",
@@ -5379,6 +5746,7 @@ const I18N = {
     "f.shadowcalc":"Calcul d'ombre", "sh.relief":"Relief seul", "sh.veg":"Végétation seule", "both":"Les deux",
     "f.dir":"Sens du parcours", "di.cw":"Horaire", "di.ccw":"Anti-horaire",
     "f.kmltype":"Type d'analyse KML", "an.ombre":"Ombre / Soleil", "an.pente":"Pente (depuis MNT)",
+    "f.slopearrows":"Flèches de sens sur la trace", "hint.slopewin":"= fenêtre de lissage de la pente",
     "out.openkml":"Ouvrir le KML résultat après calcul", "out.tiles":"Visualiser les tuiles (KML)",
     "out.shadowmap":"Générer carte d'ombre (GeoTIFF)", "out.sunrays":"Visualiser rayons solaires (KML)",
     "f.rayint":"Intervalle rayons",
@@ -5410,6 +5778,7 @@ const I18N = {
     "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.help":"? Help", "btn.hist":"⏱ History",
     "sec.file":"GPX file & date", "sec.dem":"Elevation model (DEM)",
     "sec.params":"Simulation options", "sec.out":"Outputs & visualisations", "sec.legend":"Legends",
+    "sec.modes":"Modes",
     "f.gpx":"GPX file", "f.date":"Start date", "f.time":"Time",
     "f.res":"Analysis resolution (m)", "f.maxdist":"Max shadow distance (m)", "f.margin":"BBox margin (m)",
     "f.batch":"Batch size", "f.workers":"Workers (parallel)", "f.ptint":"Point interval (min)",
@@ -5417,6 +5786,7 @@ const I18N = {
     "f.shadowcalc":"Shadow calculation", "sh.relief":"Relief only", "sh.veg":"Vegetation only", "both":"Both",
     "f.dir":"Route direction", "di.cw":"Clockwise", "di.ccw":"Counter-clockwise",
     "f.kmltype":"KML analysis type", "an.ombre":"Shade / Sun", "an.pente":"Slope (from DEM)",
+    "f.slopearrows":"Direction arrows on the track", "hint.slopewin":"= slope smoothing window",
     "out.openkml":"Open result KML after run", "out.tiles":"Visualise tiles (KML)",
     "out.shadowmap":"Generate shadow map (GeoTIFF)", "out.sunrays":"Visualise sun rays (KML)",
     "f.rayint":"Ray interval",
@@ -5580,6 +5950,7 @@ function loadDefaults(d) {
   document.getElementById('f-generate-shadow-map').checked = !!d.generate_shadow_map;
   document.getElementById('f-visualize-sun-rays').checked  = !!d.visualize_sun_rays;
   document.getElementById('f-sun-ray-interval').value      = d.sun_ray_interval || '20';
+  document.getElementById('f-show-slope-arrows').checked   = !!d.show_slope_arrows;
   appliquerLegendes();
   attacherListeners();
 }
@@ -5593,6 +5964,9 @@ function attacherListeners() {
 
 function appliquerLegendes() {
   const at = (document.querySelector('input[name=analysis]:checked') || {}).value || 'ombre_soleil';
+  // Mode « Pente depuis MNT » = coloration de la trace seule : on masque tous
+  // les champs liés au calcul d'ombre (classe .shadow-only, via body.mode-pente).
+  document.body.classList.toggle('mode-pente', at === 'pente');
   document.getElementById('legend-kml').classList.toggle('hidden',  at !== 'ombre_soleil');
   document.getElementById('legend-slope').classList.toggle('hidden', at !== 'pente');
   const vt = document.getElementById('f-visualize-tiles').checked;
@@ -5826,6 +6200,8 @@ async function pollOnce() {
 let _running = false;
 
 function getConfig() {
+  const analysisType = getRadio('analysis');
+  const pente = (analysisType === 'pente');
   return {
     gpx_file:             document.getElementById('f-gpx').value.trim(),
     date:                 iso_to_ddmmyyyy(document.getElementById('f-date').value),
@@ -5839,13 +6215,18 @@ function getConfig() {
     passage_interval_min: document.getElementById('f-passage-interval').value,
     solar_step_s:         document.getElementById('f-solar-step').value,
     shadow_mode:          getRadio('shadow'),
-    direction:            getRadio('direction'),
-    analysis_type:        getRadio('analysis'),
+    // Mode pente : la pente est indépendante du sens de marche, on force un
+    // seul sens (sinon deux KML identiques). Champs ombre forcés à off, même
+    // si des cases étaient restées cochées avant de basculer en pente.
+    direction:            pente ? 'CW' : getRadio('direction'),
+    analysis_type:        analysisType,
     open_gpx:             document.getElementById('f-open-gpx').checked,
     visualize_tiles:      document.getElementById('f-visualize-tiles').checked,
-    generate_shadow_map:  document.getElementById('f-generate-shadow-map').checked,
-    visualize_sun_rays:   document.getElementById('f-visualize-sun-rays').checked,
+    generate_shadow_map:  pente ? false : document.getElementById('f-generate-shadow-map').checked,
+    visualize_sun_rays:   pente ? false : document.getElementById('f-visualize-sun-rays').checked,
     sun_ray_interval:     document.getElementById('f-sun-ray-interval').value,
+    // Flèches de sens : pertinent seulement en pente (case masquée en ombre).
+    show_slope_arrows:    pente ? document.getElementById('f-show-slope-arrows').checked : false,
   };
 }
 
@@ -5886,10 +6267,10 @@ async function lancer() {
 }
 
 async function arreter() {
-  // Annulation coopérative : on laisse _running actif, pollOnce détectera la
-  // fin RÉELLE du thread (code 130) et réarmera les boutons. L'ancienne
-  // version réarmait immédiatement : relancer avant la fin du thread
-  // répondait « un calcul est déjà en cours ».
+  // Kill immédiat du sous-processus côté Python (Api.stop). On laisse _running
+  // actif : pollOnce détecte la fin réelle (code 130) et réarme les boutons.
+  // Un process tué est mort sans ambiguïté, donc relancer ne répond jamais à
+  // tort « un calcul est déjà en cours ».
   try { await pywebview.api.stop(); } catch(e) {}
   document.getElementById('btn-stop').disabled = true;
   document.getElementById('log-status').textContent = t('stopping');
@@ -5926,8 +6307,17 @@ def run_headless(args, tz_finder):
     def log_func(msg):
         logging.info(msg)
 
+    _gui_child = os.environ.get("GPXSOLAR_CHILD") == "1"
     _last = {"pct": -1}
     def progress_cb(value, text=""):
+        # Piloté par la GUI : progression structurée (ndjson) pour la barre du
+        # parent, sans polluer le log. En terminal : ligne [ nn%] classique.
+        if _gui_child:
+            try:
+                _gui_ipc_emit({"progress": {"value": float(value), "text": str(text)}})
+            except Exception:
+                pass
+            return
         try:
             pct = int(float(value))
         except Exception:
@@ -5960,6 +6350,7 @@ def run_headless(args, tz_finder):
             bool(args.visualize_sun_rays),
             int(args.sun_ray_interval),
             args.analysis_type,
+            bool(args.show_slope_arrows),
         )
     except Exception as e:
         logging.error(f"FATAL ERROR: {e}")
@@ -5971,7 +6362,7 @@ def run_headless(args, tz_finder):
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--version', action='version', version='gpxsolar 1.2.1 (2026-07)')
+    parser.add_argument('--version', action='version', version='gpxsolar 1.3.0 (2026-07)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
@@ -6014,6 +6405,8 @@ def main():
                          help='Generate the raster shadow map (basemap) as KMZ.')
     grp_cli.add_argument('--visualize-sun-rays', action='store_true',
                          help='Draw the simulated sun rays in the KML.')
+    grp_cli.add_argument('--show-slope-arrows', action='store_true',
+                         help='Draw travel-direction arrows on the slope-coloured KML.')
     grp_cli.add_argument('--sun-ray-interval', type=int, default=20,
                          help='Interval between sun rays (default: 20).')
     grp_cli.add_argument('--batch-size', type=int, default=256,
@@ -6039,6 +6432,11 @@ def main():
     logging.getLogger().setLevel(logging.INFO)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S')
     # --- Fin de la modification du logging ---
+
+    # Mode « enfant de la GUI » (sous-processus tué net par le bouton Arrêter) :
+    # rerouter tout le logging vers le canal ndjson lu par le parent.
+    if os.environ.get("GPXSOLAR_CHILD") == "1":
+        _install_gui_ipc_logging()
 
     if not os.path.exists(SHADOW_GPX_DIR): os.makedirs(SHADOW_GPX_DIR)
 
