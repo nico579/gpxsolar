@@ -4973,7 +4973,7 @@ def show_form(args, tz_finder, output_default):
 
     # Alignée sur --version (l'ancien "v28.5" était un compteur interne
     # divergent de la version publiée).
-    APP_VERSION = "v1.3.2"
+    APP_VERSION = "v1.3.3"
     config = load_config()
 
     # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
@@ -5406,9 +5406,13 @@ def show_form(args, tz_finder, output_default):
     api.window = win
 
     def _au_close():
-        """Fermeture de la fenêtre : tuer un calcul encore en cours pour ne pas
-        laisser un sous-processus headless orphelin (mêmes raisons que le jumeau
-        lidar2map : sous Qt, webview.start() peut ne pas rendre la main)."""
+        """Fermeture de la fenêtre : tuer un calcul en cours, puis sortie
+        INCONDITIONNELLE via os._exit(0). Sans ce _exit, le process GUI survit à
+        la fenêtre sous Qt/QtWebEngine (threads/QtWebEngineProcess qui traînent),
+        et en dev le parent bloqué sur subprocess.run(venv) laisse le terminal
+        occupé sur les lignes de bootstrap. Les écritures critiques (config,
+        historique) sont atomiques et déjà faites, donc _exit est sûr. Modèle
+        identique au jumeau lidar2map."""
         try:
             proc = getattr(api, "_process", None) or getattr(api, "_proc", None)
             if proc and proc.poll() is None:
@@ -5419,12 +5423,13 @@ def show_form(args, tz_finder, output_default):
                     pass
         except Exception:
             pass
+        os._exit(0)
 
     win.events.closed += _au_close
     # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12). Via --debug.
     webview.start(debug=bool(getattr(args, "debug", False)))
     # Filet : si l'événement `closed` n'a pas été délivré mais que start() rend
-    # la main, on repasse par le même chemin d'extinction.
+    # la main, on repasse par le même chemin d'extinction (os._exit).
     _au_close()
 
 
@@ -5532,7 +5537,7 @@ def run_headless(args, tz_finder):
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--version', action='version', version='gpxsolar 1.3.2 (2026-07)')
+    parser.add_argument('--version', action='version', version='gpxsolar 1.3.3 (2026-07)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
