@@ -30,6 +30,8 @@ import subprocess
 import signal
 import sys
 import os
+import time
+import contextlib
 import platform
 import importlib.util
 import logging
@@ -1201,6 +1203,19 @@ def check_cancelled():
         raise CalculationCancelled("stop requested")
 
 
+@contextlib.contextmanager
+def log_phase(label, log_func):
+    """Chronomètre une étape et logue son temps à la fin : « ⏱ <étape> : N.Ns ».
+    Le canal ndjson (mode enfant GUI) n'ajoute pas d'horodatage aux lignes, donc
+    ce timing explicite est le seul moyen de voir où part le temps (typiquement
+    le téléchargement des tuiles). Le temps est logué même si l'étape lève."""
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        log_func(f"⏱ {label} : {time.perf_counter() - t0:.1f}s")
+
+
 # ── Canal enfant → parent (ndjson) ────────────────────────────────────────────
 # Quand le moteur tourne comme sous-processus de la GUI (env GPXSOLAR_CHILD=1),
 # il renvoie logs et progression au parent en JSON-lines sur stdout : une ligne
@@ -1889,7 +1904,14 @@ class LidarManager:
     
     MAX_CACHE_SIZE = 50  # Nombre max de tuiles en RAM par couche
     MAX_RETRIES = 3      # Nombre de tentatives de téléchargement
-    
+    # Téléchargements parallèles. Léger sur-provisionnement : le serveur WMS
+    # met plusieurs secondes à RENDRE chaque dalle (calcul côté geopf, pas de
+    # trafic), le transfert lui est bref. Avoir plus de requêtes en vol que la
+    # bande passante stricte ne l'exige garde le tuyau plein — pendant qu'une
+    # dalle se calcule côté serveur, une autre descend (comble les « creux »).
+    # Borné pour ne pas se faire throttler par geopf.fr.
+    DOWNLOAD_WORKERS = 8
+
     def __init__(self, log_func=print, progress_callback=None, *,
                  layer_map=None, cache_dir="LIDAR_CACHE", cache_prefix="LIDAR",
                  tile_px=2000):
@@ -1912,6 +1934,21 @@ class LidarManager:
         self.lock = threading.RLock() # RLock pour les appels imbriqués
         self.downloaded_tiles = set()  # Tuiles téléchargées
         self.used_tiles = set()  # Tuiles effectivement utilisées pour le ray-tracing
+
+        # Session HTTP PARTAGÉE + pool de connexions : sans elle, chaque tuile
+        # rouvrait une connexion TCP + poignée TLS (plusieurs aller-retours au
+        # serveur), coût payé à CHAQUE dalle. La Session garde les connexions
+        # ouvertes (keep-alive) et les réutilise. Pool dimensionné au nombre de
+        # workers pour ne pas jeter/rouvrir de connexions en parallèle. Thread-safe
+        # pour des .get() concurrents (on ne mute pas la Session). max_retries=0 :
+        # on gère nos propres retries dans _fetch_tile_to_disk.
+        self.session = requests.Session()
+        _adapter = requests.adapters.HTTPAdapter(
+            pool_connections=self.DOWNLOAD_WORKERS,
+            pool_maxsize=self.DOWNLOAD_WORKERS,
+            max_retries=0)
+        self.session.mount("https://", _adapter)
+        self.session.mount("http://", _adapter)
 
 
     def _compute_average_solar_azimuth(self, points, start_time):
@@ -2048,103 +2085,118 @@ class LidarManager:
     # remplacée par HGTDataManager.prepare_lidar_data qui utilise directement
     # _calculate_solar_filtered_bbox_tiles + compute_lidar_tiles_from_solar_rays_batched).
 
-    def _ensure_tile_downloaded(self, key, tx, ty):
-        """
-        Télécharge une tuile si elle n'existe pas sur disque
-        (avec gestion des retries pour la robustesse réseau)
-        
-        Returns:
-            True si téléchargement réussi ou fichier déjà présent
-            False en cas d'échec après MAX_RETRIES tentatives
-        """
+    def _tile_cache_path(self, key, tx, ty):
+        return os.path.join(
+            self.cache_dir, f"{self.cache_prefix}_{key}_L93_1km_{tx}_{ty}.tif")
+
+    def _fetch_tile_to_disk(self, key, tx, ty):
+        """Télécharge UNE tuile WMS sur disque (écriture atomique), SANS prendre
+        self.lock ni toucher au cache RAM. Isolé pour pouvoir paralléliser les
+        téléchargements : le HTTP est le goulot (I/O réseau), et le tenir sous le
+        lock global sérialisait tout. Retourne True si le fichier est présent en
+        sortie (déjà là ou fraîchement téléchargé), False sinon."""
         layer_name = self.layer_map.get(key)
         if not layer_name:
             self.log(f"❌ Error: Couche {key} non reconnue")
             return False
-        
-        x0 = tx * 1000
-        y0 = ty * 1000
-        tile_bbox = f"{x0},{y0},{x0+1000},{y0+1000}"
-        
-        cache_filename = f"{self.cache_prefix}_{key}_L93_1km_{tx}_{ty}.tif"
-        cache_path = os.path.join(self.cache_dir, cache_filename)
-
+        cache_path = self._tile_cache_path(key, tx, ty)
         if os.path.exists(cache_path):
-            self.downloaded_tiles.add((tx, ty)) # AJOUT: Ajouter la tuile à downloaded_tiles même si déjà présente
-
             return True
 
-        with self.lock:
-            # Double-check après verrouillage
-            if os.path.exists(cache_path):
-                self.downloaded_tiles.add((tx, ty)) # AJOUT: Ajouter la tuile à downloaded_tiles même si déjà présente
+        x0, y0 = tx * 1000, ty * 1000
+        params = {
+            'SERVICE': 'WMS', 'VERSION': '1.3.0', 'REQUEST': 'GetMap',
+            'LAYERS': layer_name, 'FORMAT': 'image/geotiff', 'CRS': 'EPSG:2154',
+            'BBOX': f"{x0},{y0},{x0+1000},{y0+1000}",
+            'WIDTH': self.tile_px, 'HEIGHT': self.tile_px, 'STYLES': ''
+        }
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self.session.get(
+                    "https://data.geopf.fr/wms-r", params=params, timeout=90)
+                response.raise_for_status()
 
+                # Un ServiceException WMS arrive en HTTP 200 avec un corps XML :
+                # l'écrire en .tif créerait une tuile corrompue PERMANENTE en
+                # cache. Magic bytes TIFF : 'II*\0' (LE) / 'MM\0*' (BE).
+                if not response.content.startswith((b'II*\x00', b'MM\x00*')):
+                    head = response.content[:200].decode('utf-8', 'replace')
+                    raise requests.exceptions.RequestException(
+                        f"réponse WMS non-GeoTIFF : {head!r}")
+
+                # Écriture atomique via temp UNIQUE (pid+thread) : en parallèle,
+                # deux threads sur la même tuile n'écrivent pas dans le même .part
+                # (le dernier os.replace gagne, les deux fichiers étant valides).
+                _tmp = f"{cache_path}.{os.getpid()}.{threading.get_ident()}.part"
+                with open(_tmp, 'wb') as f:
+                    f.write(response.content)
+                os.replace(_tmp, cache_path)
+                self.log(f"  ✓ Tuile {tx},{ty} téléchargée")
                 return True
 
-            # Téléchargement avec retries
-            params = {
-                'SERVICE': 'WMS',
-                'VERSION': '1.3.0',
-                'REQUEST': 'GetMap',
-                'LAYERS': layer_name,
-                'FORMAT': 'image/geotiff',
-                'CRS': 'EPSG:2154',
-                'BBOX': tile_bbox,
-                'WIDTH': self.tile_px,
-                'HEIGHT': self.tile_px,
-                'STYLES': ''
-            }
-            
-            for attempt in range(1, self.MAX_RETRIES + 1):
-                try:
-
-                    
-                    response = requests.get(
-                        "https://data.geopf.fr/wms-r",
-                        params=params,
-                        timeout=90
-                    )
-                    response.raise_for_status()
-
-                    # Un ServiceException WMS arrive en HTTP 200 avec un corps
-                    # XML : l'écrire en .tif créerait une tuile corrompue
-                    # PERMANENTE en cache (relue en boucle, jamais purgée).
-                    # Magic bytes TIFF : 'II*\0' (little-endian) / 'MM\0*'.
-                    if not response.content.startswith((b'II*\x00', b'MM\x00*')):
-                        head = response.content[:200].decode('utf-8', 'replace')
-                        raise requests.exceptions.RequestException(
-                            f"réponse WMS non-GeoTIFF : {head!r}")
-
-                    # Écriture atomique : .part puis os.replace (kill-safe, cf.
-                    # WorldCover). Une tuile présente est donc toujours complète.
-                    _tmp = cache_path + ".part"
-                    with open(_tmp, 'wb') as f:
-                        f.write(response.content)
-                    os.replace(_tmp, cache_path)
-
-                    self.log(f"  ✓ Tuile {tx},{ty} téléchargée")
-
-                    self.downloaded_tiles.add((tx, ty)) # <-- Ceci est self.lidar_manager.downloaded_tiles
-
-                    return True
-                    
-                except requests.exceptions.Timeout:
-                    self.log(f"  ⏱️ Timeout (tentative {attempt}/{self.MAX_RETRIES})")
-                    if attempt == self.MAX_RETRIES:
-                        self.log(f"  ❌ Abandon après {self.MAX_RETRIES} tentatives")
-                        return False
-                    
-                except requests.exceptions.RequestException as e:
-                    self.log(f"  ❌ Erreur réseau: {e}")
-                    if attempt == self.MAX_RETRIES:
-                        return False
-                    
-                except Exception as e:
-                    self.log(f"  ❌ Erreur inattendue: {e}")
+            except requests.exceptions.Timeout:
+                self.log(f"  ⏱️ Timeout (tentative {attempt}/{self.MAX_RETRIES})")
+                if attempt == self.MAX_RETRIES:
+                    self.log(f"  ❌ Abandon après {self.MAX_RETRIES} tentatives")
                     return False
-        
+            except requests.exceptions.RequestException as e:
+                self.log(f"  ❌ Erreur réseau: {e}")
+                if attempt == self.MAX_RETRIES:
+                    return False
+            except Exception as e:
+                self.log(f"  ❌ Erreur inattendue: {e}")
+                return False
         return False
-    
+
+    def _ensure_tile_downloaded(self, key, tx, ty):
+        """Garantit qu'une tuile est sur disque (chemin séquentiel/lazy, sous
+        lock). Le vrai téléchargement est délégué à _fetch_tile_to_disk."""
+        cache_path = self._tile_cache_path(key, tx, ty)
+        if os.path.exists(cache_path):
+            self.downloaded_tiles.add((tx, ty))
+            return True
+        with self.lock:
+            # Double-check après verrouillage (une autre thread a pu télécharger).
+            if os.path.exists(cache_path):
+                self.downloaded_tiles.add((tx, ty))
+                return True
+            if self._fetch_tile_to_disk(key, tx, ty):
+                self.downloaded_tiles.add((tx, ty))
+                return True
+        return False
+
+    def prefetch_tiles_parallel(self, tasks, workers=None):
+        """Télécharge en PARALLÈLE une liste de tuiles (key, tx, ty) distinctes.
+        Le HTTP se fait hors lock (_fetch_tile_to_disk) → vrai parallélisme I/O ;
+        seul l'enregistrement dans downloaded_tiles est verrouillé (rapide). Les
+        tuiles déjà sur disque sont ignorées. Propage CalculationCancelled."""
+        workers = workers or self.DOWNLOAD_WORKERS
+        todo = [t for t in tasks if not os.path.exists(self._tile_cache_path(*t))]
+        if not todo:
+            return 0
+
+        def _one(task):
+            check_cancelled()
+            key, tx, ty = task
+            if self._fetch_tile_to_disk(key, tx, ty):
+                with self.lock:
+                    self.downloaded_tiles.add((tx, ty))
+                return True
+            return False
+
+        n_ok = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [ex.submit(_one, t) for t in todo]
+            try:
+                for fut in concurrent.futures.as_completed(futures):
+                    if fut.result():
+                        n_ok += 1
+            except CalculationCancelled:
+                for f in futures:
+                    f.cancel()
+                raise
+        return n_ok
+
     def _load_tile_to_ram(self, key, tx, ty):
         """
         ✅ LAZY LOADING: Charge une tuile en RAM (télécharge si nécessaire)
@@ -2413,13 +2465,22 @@ class HGTDataManager:
                 f"Chargement Hybride LiDAR: {total_tiles_to_process} tuiles..."
             )
             
+        # Phase 1 : téléchargement PARALLÈLE (le HTTP est le goulot, hors lock).
+        # Avant, la boucle séquentielle téléchargeait une tuile de 16 Mo à la
+        # fois (LiDAR HD = 2000 px × 2 couches) : très long. Idée du jumeau
+        # lidar2map (ThreadPoolExecutor pour les téléchargements de tuiles).
+        all_tasks = [(key, tx, ty) for key in ['mnt', 'mnh'] for (tx, ty) in final_tiles]
+        self.lidar_manager.prefetch_tiles_parallel(all_tasks)
+
+        # Phase 2 : chargement en RAM séquentiel (lecture disque + cache LRU sous
+        # lock). Les tuiles sont déjà sur disque (phase 1), donc pas de download
+        # ici. Séquentiel car la mutation du cache LRU doit rester sérialisée.
         processed_tiles = 0
         for key in ['mnt', 'mnh']:
             for tx, ty in final_tiles:
                 check_cancelled()
-                self.lidar_manager._ensure_tile_downloaded(key, tx, ty)
                 self.lidar_manager._load_tile_to_ram(key, tx, ty)
-                
+
                 processed_tiles += 1
                 if self.progress_callback and total_tiles_to_process > 0:
                     progress_value = (overall_current_progress_start +
@@ -4716,7 +4777,8 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                      "(Géoplateforme, points), sans téléchargement de tuile.")
         elif hgt_manager.source == 'ign_lidar_hd':
             if want_shadow_data:
-                hgt_manager.prepare_lidar_data(points, start_dt_naive)
+                with log_phase("Préchargement tuiles LiDAR (corridor solaire)", log_func):
+                    hgt_manager.prepare_lidar_data(points, start_dt_naive)
             else:
                 # Pente seule : pas de préchargement du corridor solaire ; les
                 # tuiles MNT sous la trace seront lazy-chargées par le calcul.
@@ -4748,11 +4810,13 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 gpx_clone = gpxpy.parse(f_clone)
 
             # Appel direct de simulatehike, le profiler est au-dessus
-            data, stats = simulatehike(gpx_clone, start_dt_naive, hgt_manager,
-                                       local_tz_for_trace, code, shadow_mode,
-                                       progress_callback, batch_size=batch_size,
-                                       solar_step_s=solar_step_s,
-                                       compute_shadows=compute_shadows)
+            _phase = "Analyse de la trace (pente)" if not compute_shadows else f"Ray-tracing ombre ({label})"
+            with log_phase(_phase, log_func):
+                data, stats = simulatehike(gpx_clone, start_dt_naive, hgt_manager,
+                                           local_tz_for_trace, code, shadow_mode,
+                                           progress_callback, batch_size=batch_size,
+                                           solar_step_s=solar_step_s,
+                                           compute_shadows=compute_shadows)
             
             if not data: continue
             
@@ -4793,11 +4857,12 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 
                 # Générer le GeoTIFF. margin_meters transmis : le réglage GUI
                 # « Marge bbox » était silencieusement ignoré (défaut 500 forcé).
-                compute_shadow_geotiff(
-                    data, hgt_manager, shadow_mode, float(analysis_resolution),
-                    shadow_map_tif_path, progress_callback,
-                    num_workers=num_workers, margin_meters=margin_meters
-                )
+                with log_phase("Calcul carte d'ombre (GeoTIFF)", log_func):
+                    compute_shadow_geotiff(
+                        data, hgt_manager, shadow_mode, float(analysis_resolution),
+                        shadow_map_tif_path, progress_callback,
+                        num_workers=num_workers, margin_meters=margin_meters
+                    )
 
                 # Trace colorée exportée AUSSI en KML autonome (= un "track" Locus).
                 # Dans Locus Map / OsmAnd un track GPX/KML coexiste avec un
@@ -4819,29 +4884,30 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 # Chemin pour le KMZ final
                 kmz_output_path = os.path.join(SHADOW_GPX_DIR, f"{shadow_map_name_base}.kmz")
 
-                # Générer le KMZ en fusionnant la trace et la carte d'ombre (qui inclut maintenant la grille si générée)
-                final_output_path = geotiff_to_kml_groundoverlay(
-                    shadow_map_tif_path,
-                    kmz_output_path,
-                    log_func,
-                    existing_kml_obj=trace_kml_obj,
-                    progress_callback=progress_callback
-                )
+                with log_phase("Export KMZ + MBTiles", log_func):
+                    # Générer le KMZ en fusionnant la trace et la carte d'ombre (qui inclut maintenant la grille si générée)
+                    final_output_path = geotiff_to_kml_groundoverlay(
+                        shadow_map_tif_path,
+                        kmz_output_path,
+                        log_func,
+                        existing_kml_obj=trace_kml_obj,
+                        progress_callback=progress_callback
+                    )
 
-                out_name = os.path.basename(final_output_path) if final_output_path else None
-                if first_output_path is None: first_output_path = final_output_path
+                    out_name = os.path.basename(final_output_path) if final_output_path else None
+                    if first_output_path is None: first_output_path = final_output_path
 
-                # Export MBTiles overlay (calque transparent pour Locus Map /
-                # OsmAnd / OruxMaps…). Non bloquant : un échec ne doit pas
-                # compromettre le KMZ déjà produit.
-                try:
-                    mbtiles_output_path = os.path.join(
-                        SHADOW_GPX_DIR, f"{shadow_map_name_base}.mbtiles")
-                    geotiff_to_mbtiles_overlay(
-                        shadow_map_tif_path, mbtiles_output_path, log_func,
-                        progress_callback=progress_callback)
-                except Exception as e_mbt:
-                    log_func(f"WARNING: MBTiles export skipped: {e_mbt}")
+                    # Export MBTiles overlay (calque transparent pour Locus Map /
+                    # OsmAnd / OruxMaps…). Non bloquant : un échec ne doit pas
+                    # compromettre le KMZ déjà produit.
+                    try:
+                        mbtiles_output_path = os.path.join(
+                            SHADOW_GPX_DIR, f"{shadow_map_name_base}.mbtiles")
+                        geotiff_to_mbtiles_overlay(
+                            shadow_map_tif_path, mbtiles_output_path, log_func,
+                            progress_callback=progress_callback)
+                    except Exception as e_mbt:
+                        log_func(f"WARNING: MBTiles export skipped: {e_mbt}")
 
 
             else:
@@ -4907,7 +4973,7 @@ def show_form(args, tz_finder, output_default):
 
     # Alignée sur --version (l'ancien "v28.5" était un compteur interne
     # divergent de la version publiée).
-    APP_VERSION = "v1.3.0"
+    APP_VERSION = "v1.3.1"
     config = load_config()
 
     # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
@@ -6362,7 +6428,7 @@ def run_headless(args, tz_finder):
 
 def main():
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--version', action='version', version='gpxsolar 1.3.0 (2026-07)')
+    parser.add_argument('--version', action='version', version='gpxsolar 1.3.1 (2026-07)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
