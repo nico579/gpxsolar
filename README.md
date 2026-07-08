@@ -43,6 +43,12 @@ From a GPX file + date/time:
   - **IGN LiDAR HD 0.5 m** — France, very high resolution (DTM, DSM, CHM)
 - **Vegetation shadows** via ESA WorldCover (estimated canopy height), which can
   be disabled.
+- **Slope mode** (`--analysis-type pente`, an alternative to sun/shade): colors
+  the track by gradient computed from the DEM, never from the GPX elevation
+  (which GPS makes unreliable). For France sources it queries the IGN RGE ALTI
+  1 m elevation point API, so it downloads no tiles. The *analysis resolution*
+  sets the slope smoothing window, and travel-direction arrows are optional
+  (`--show-slope-arrows`).
 - **Outputs**: colorized KMZ (Google Earth), **MBTiles** overlay + **KML** track
   for smartphone GPS apps (Locus Map, OsmAnd…), and an aggregated CSV. Optional
   timestamped waypoints along the route.
@@ -186,7 +192,8 @@ Then in the window:
 2. Select the **date** and **start time**.
 3. Choose an **elevation source**: SRTM/Copernicus (global), IGN ALTI
    (France), IGN LiDAR HD (France, DTM/DSM/CHM).
-4. Set the options (shadow type, vegetation, analysis resolution).
+4. Choose the **analysis type** (sun/shade, or slope coloring) and set the
+   options (shadow type, vegetation, analysis resolution).
 5. **Run the computation** → KML/KMZ + CSV.
 
 ### Command-line mode (headless)
@@ -290,14 +297,17 @@ Main options (full list: `gpxsolar.exe --help`):
 --gpx PATH                       # GPX file (triggers command-line mode)
 --date DD/MM/YYYY --time HH:MM   # start date and time
 --dem-source {srtm1,copernicus,ign_bdalti_25m,ign_rgealti_5m,ign_lidar_hd}
+--analysis-type {ombre_soleil,pente}  # sun/shade (default) or slope coloring
 --shadow-mode {relief,vegetation,both}      # shadow type (default: both)
 --direction {CW,CCW,both}        # simulated travel direction (default: both)
 --generate-shadow-map            # raster shadow map (base map) in KMZ
 --visualize-sun-rays             # draw the sun rays
 --visualize-tiles                # draw the DEM tiles used
+--show-slope-arrows              # travel-direction arrows (slope mode)
 --sun-ray-interval 20            # spacing of the sun rays
---analysis-resolution 5.0        # sampling step of the shadow computation (m)
+--analysis-resolution 5.0        # shadow sampling step, or slope smoothing window (m)
 --max-shadow-distance 1000       # max shadow-detection range (m)
+--margin-meters 500              # bbox margin around the track, shadow map (m)
 --passage-interval-min 0         # timestamped waypoints (0=none)
 --no-vegetation-shadow           # ignore the vegetation shadow
 --no-download-vegetation         # do not download WorldCover
@@ -319,9 +329,12 @@ shadow sweeps across the hillside as the sun moves.
 ### Graphical interface
 
 pywebview form: GPX choice, start date and time, elevation source
-(SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), shadow type and options.
+(SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), analysis type (sun/shade or
+slope), shadow type and options. In slope mode the shadow-only fields are hidden.
 
-![gpxsolar interface](screenshots/GUI.PNG)
+| Sun / shade analysis | Slope analysis (from DEM) |
+|---|---|
+| ![gpxsolar sun/shade interface](screenshots/GUI.PNG) | ![gpxsolar slope interface](screenshots/GUI_Pente.PNG) |
 
 ### Rendering in Google Earth
 
@@ -331,6 +344,11 @@ map and the simulated sun rays.
 | Colored sun/shade track | + base map | + sun rays |
 |---|---|---|
 | ![GPX track shadows](screenshots/ombres_gpx.PNG) | ![GPX track + map](screenshots/ombres_gpx_carte.PNG) | ![GPX track + map + rays](screenshots/ombres_gpx_carte_rayons.PNG) |
+
+And in **slope mode** (`--analysis-type pente`), the track is colored by gradient
+computed from the DEM (green = flat, through orange, to dark red = steep):
+
+![GPX track colored by slope](screenshots/pente.PNG)
 
 ---
 

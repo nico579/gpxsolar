@@ -44,6 +44,12 @@ un récapitulatif CSV.
   - **IGN LiDAR HD 0.5 m** — France, très haute résolution (MNT, MNS, MNH)
 - **Ombres de végétation** via ESA WorldCover (hauteur de canopée estimée),
   désactivables.
+- **Mode pente** (`--analysis-type pente`, alternative au soleil/ombre) : colore
+  la trace selon l'inclinaison calculée depuis le MNT, jamais depuis l'altitude
+  GPX (peu fiable, le GPS bugue souvent). Pour les sources France, il interroge
+  l'API de points d'altitude IGN RGE ALTI 1 m, donc sans téléchargement de tuile.
+  La *résolution d'analyse* fixe la fenêtre de lissage de la pente, et les
+  flèches de sens de parcours sont optionnelles (`--show-slope-arrows`).
 - **Sorties** : KMZ colorisé (Google Earth), overlay **MBTiles** + trace **KML**
   pour les apps GPS smartphone (Locus Map, OsmAnd…), et CSV agrégé. Option de
   points de passage horodatés tout au long du parcours.
@@ -187,7 +193,8 @@ Puis dans la fenêtre :
 2. Sélectionnez **date** et **heure de départ**.
 3. Choisissez une **source d'altitude** : SRTM/Copernicus (mondial), IGN ALTI
    (France), IGN LiDAR HD (France, MNT/MNS/MNH).
-4. Réglez les options (type d'ombre, végétation, résolution d'analyse).
+4. Choisissez le **type d'analyse** (soleil/ombre, ou coloration de pente) et
+   réglez les options (type d'ombre, végétation, résolution d'analyse).
 5. **Lancez le calcul** → KML/KMZ + CSV.
 
 ### Mode ligne de commande (headless)
@@ -292,14 +299,17 @@ Principales options (liste complète : `gpxsolar.exe --help`) :
 --gpx CHEMIN                     # fichier GPX (déclenche le mode ligne de commande)
 --date JJ/MM/AAAA --time HH:MM   # date et heure de départ
 --dem-source {srtm1,copernicus,ign_bdalti_25m,ign_rgealti_5m,ign_lidar_hd}
+--analysis-type {ombre_soleil,pente}  # analyse : soleil/ombre (défaut) ou pente
 --shadow-mode {relief,vegetation,both}      # type d'ombre (défaut: both)
 --direction {CW,CCW,both}        # sens de parcours simulé (défaut: both)
 --generate-shadow-map            # carte d'ombre raster (fond de carte) en KMZ
 --visualize-sun-rays             # dessiner les rayons solaires
 --visualize-tiles                # dessiner les dalles/tuiles DEM utilisées
+--show-slope-arrows              # flèches de sens de parcours (mode pente)
 --sun-ray-interval 20            # espacement des rayons solaires
---analysis-resolution 5.0        # pas d'échantillonnage du calcul d'ombre (m)
+--analysis-resolution 5.0        # pas d'échantillonnage ombre, ou fenêtre de lissage pente (m)
 --max-shadow-distance 1000       # portée max de détection d'ombre (m)
+--margin-meters 500              # marge bbox autour de la trace, carte d'ombre (m)
 --passage-interval-min 0         # points de passage horodatés (0=aucun)
 --no-vegetation-shadow           # ignorer l'ombre de la végétation
 --no-download-vegetation         # ne pas télécharger WorldCover
@@ -321,9 +331,12 @@ portée balaie le versant à mesure que le soleil tourne.
 ### Interface graphique
 
 Formulaire pywebview : choix du GPX, date et heure de départ, source d'altitude
-(SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), type d'ombre et options.
+(SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), type d'analyse (soleil/ombre ou
+pente), type d'ombre et options. En mode pente, les champs liés à l'ombre sont masqués.
 
-![Interface gpxsolar](screenshots/GUI.PNG)
+| Analyse soleil / ombre | Analyse de pente (depuis MNT) |
+|---|---|
+| ![Interface soleil/ombre gpxsolar](screenshots/GUI.PNG) | ![Interface pente gpxsolar](screenshots/GUI_Pente.PNG) |
 
 ### Rendu dans Google Earth
 
@@ -333,6 +346,12 @@ de carte et les rayons solaires simulés.
 | Tracé coloré soleil/ombre | + fond de carte | + rayons solaires |
 |---|---|---|
 | ![Ombres du tracé GPX](screenshots/ombres_gpx.PNG) | ![Tracé GPX + carte](screenshots/ombres_gpx_carte.PNG) | ![Tracé GPX + carte + rayons](screenshots/ombres_gpx_carte_rayons.PNG) |
+
+Et en **mode pente** (`--analysis-type pente`), la trace est colorée selon
+l'inclinaison calculée depuis le MNT (vert = plat, puis orange, jusqu'au rouge
+foncé = raide) :
+
+![Tracé GPX coloré selon la pente](screenshots/pente.PNG)
 
 ---
 
