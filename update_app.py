@@ -133,7 +133,7 @@ def _patch_linux_targz(input_path, output_path, new_script, extras=None):
 
 # ── Mode archive macOS ────────────────────────────────────────────────────────
 
-def _update_macos_archive(outer_path, new_script_bytes):
+def _update_macos_archive(outer_path, new_script_bytes, extras=None):
     """Patch chirurgical d'un gpxsolar-macos-*.zip — préserve les permissions
     Unix encodées par ditto (Contents/MacOS/gpxsolar mode 0o755, symlinks
     PyQt6, etc.)."""
@@ -147,7 +147,7 @@ def _update_macos_archive(outer_path, new_script_bytes):
                      f"dans {outer_path.name} — pas une archive .app valide.")
         inner_bytes = outer.read(inner_name)
 
-    new_inner_bytes = _patch_inner_bundle(inner_bytes, new_script_bytes)
+    new_inner_bytes = _patch_inner_bundle(inner_bytes, new_script_bytes, extras=extras)
 
     tmp = outer_path.with_suffix(".zip.tmp")
     print(f"Mise à jour de {TARGET} dans {inner_name} de {outer_path.name}...")
@@ -311,7 +311,7 @@ def _patch_release_body(body, sha_by_filename):
     return body
 
 
-def _do_release(tag, new_script, dry_run=False):
+def _do_release(tag, new_script, extras=None, dry_run=False):
     print(f"\n── Release {tag} (download/patch/upload{' DRY-RUN' if dry_run else ''}) ─\n")
 
     token = _get_github_token()
@@ -358,7 +358,7 @@ def _do_release(tag, new_script, dry_run=False):
     print(f"\n[3/5] Patch des bundles internes...")
     for t in targets:
         print(f"  • {t['name']} :")
-        msg = _patch_asset(t["local"], t["kind"], new_script)
+        msg = _patch_asset(t["local"], t["kind"], new_script, extras=extras)
         new_sha = sha256(t["local"])
         t["new_sha"] = new_sha
         t["new_size"] = t["local"].stat().st_size
@@ -449,6 +449,18 @@ try:
 except SyntaxError as e:
     sys.exit(f"ERREUR : {SCRIPT.name} contient une SyntaxError ({e}) — abandon")
 
+# Front séparé gui/ (index.html + style.css + app.js) : patché dans les bundles
+# au même titre que gpxsolar.py. Le mécanisme `extras` de _patch_inner_bundle
+# remplace ces fichiers s'ils existent, ou les AJOUTE sinon — donc patcher un
+# bundle antérieur au split (sans _internal/gui/) l'installe proprement.
+GUI_DIR = HERE / "gui"
+GUI_EXTRAS = {}
+for _n in ("index.html", "style.css", "app.js"):
+    _p = GUI_DIR / _n
+    if not _p.exists():
+        sys.exit(f"ERREUR : {_p} introuvable (front gui/ requis depuis le split)")
+    GUI_EXTRAS[f"_internal/gui/{_n}"] = _p.read_bytes()
+
 # Mode --release
 if "--release" in sys.argv:
     _tag = "v1.0.0"
@@ -456,13 +468,13 @@ if "--release" in sys.argv:
         _i = sys.argv.index("--tag")
         if _i + 1 < len(sys.argv):
             _tag = sys.argv[_i + 1]
-    _do_release(_tag, new_content, dry_run="--dry-run" in sys.argv)
+    _do_release(_tag, new_content, extras=GUI_EXTRAS, dry_run="--dry-run" in sys.argv)
     sys.exit(0)
 
 # Mode archive macOS
 _archive = _find_macos_archive()
 if _archive:
-    _update_macos_archive(_archive, new_content)
+    _update_macos_archive(_archive, new_content, extras=GUI_EXTRAS)
     print("Terminé. Re-uploader l'archive sur la release (ou utiliser --release).")
     sys.exit(0)
 
@@ -482,7 +494,7 @@ if current == new_content:
 BUNDLE_TMP = BUNDLE.with_suffix(".zip.tmp")
 print(f"Mise à jour de {TARGET} dans {BUNDLE.name}...")
 try:
-    new_inner_bytes = _patch_inner_bundle(BUNDLE.read_bytes(), new_content)
+    new_inner_bytes = _patch_inner_bundle(BUNDLE.read_bytes(), new_content, extras=GUI_EXTRAS)
     BUNDLE_TMP.write_bytes(new_inner_bytes)
     os.replace(BUNDLE_TMP, BUNDLE)
 except Exception as e:

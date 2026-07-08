@@ -92,7 +92,10 @@ MAP = {
 }
 
 # Dossiers à synchroniser récursivement (mirror local -> remote)
-FOLDERS = {"screenshots": "screenshots"}
+# gui/ = front séparé (index.html + style.css + app.js), bundlé dans _internal/gui/
+# et patchable sans rebuild (cf. update_app.py qui remplace aussi gui/* dans les
+# bundles). screenshots/ = assets README (non bundlés).
+FOLDERS = {"screenshots": "screenshots", "gui": "gui"}
 
 # Anciens chemins sur GitHub à supprimer (renommages + scripts PS1 obsolètes)
 REMOVE = [
@@ -440,7 +443,11 @@ def main():
 
     # --- Phase 2 : catégorisation -> action ---
     rebuild = [c for c in changed if is_rebuild_file(c)]
-    code_changed = APP_PY in changed
+    # gpxsolar.py OU un fichier du front gui/ : les deux vivent dans _internal/
+    # et sont patchables sans rebuild (update_app.py les remplace tous). Sans le
+    # gui/, une modif d'UI seule aurait juste poussé les sources sans mettre à
+    # jour les bundles (même correctif que le jumeau lidar2map).
+    code_changed = APP_PY in changed or any(c.startswith("gui/") for c in changed)
 
     if rebuild:
         cprint("\n==> [2/2] REBUILD requis (fichiers impactant le binaire) :", "yellow")

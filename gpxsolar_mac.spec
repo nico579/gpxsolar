@@ -172,7 +172,10 @@ a_detect = Analysis(
 a = Analysis(
     ["_loader.py"],
     pathex=[], binaries=binaries,
-    datas=datas + [("gpxsolar.py", ".")],
+    datas=datas + [("gpxsolar.py", "."),     # gpxsolar.py en clair dans _internal/
+                   ("gui/index.html", "gui"), # front séparé (comme lidar2map),
+                   ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
+                   ("gui/app.js", "gui")],    # patchable sans rebuild via update_app
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=[str(_hook)], excludes=_excludes_mac, noarchive=False, optimize=0,
 )

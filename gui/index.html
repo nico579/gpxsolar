@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Simu Rando Solaire</title>
+<style>
+/*__GPXSOLAR_CSS__*/
+</style>
+</head>
+<body>
+
+<div id="main">
+<div id="btn-bar">
+  <button class="btn btn-run" id="btn-run" onclick="lancer()" data-i18n="btn.run">▶ Lancer le calcul</button>
+  <button class="btn btn-stop" id="btn-stop" onclick="arreter()" disabled data-i18n="btn.stop">■ Arrêter</button>
+  <button class="btn btn-help" onclick="afficherAide()" data-i18n="btn.help">? Aide</button>
+  <button class="btn-toggle" id="btn-hist" onclick="toggleHistorique()" data-i18n="btn.hist" style="margin-left:12px">⏱ Historique</button>
+  <button class="btn-toggle" id="btn-log"  onclick="toggleLogPanel()">📋 Logs</button>
+  <span id="footer-status" style="font-size:11px;color:var(--dim);margin-left:8px"></span>
+  <span style="margin-left:auto;display:flex;border:1px solid var(--bd);border-radius:4px;overflow:hidden"
+        title="Langue / Language">
+   <button class="btn-lang" data-lang-btn="fr" onclick="setLang('fr', true)">FR</button>
+   <button class="btn-lang" data-lang-btn="en" onclick="setLang('en', true)">EN</button>
+  </span>
+</div>
+
+<div id="form-inner">
+
+  <!-- Fichier / Date / Heure -->
+  <div class="section sec-file">
+   <div class="section-hd" data-i18n="sec.file">Fichier GPX &amp; date</div>
+   <div class="section-body">
+    <div class="row">
+      <label class="lbl" data-i18n="f.gpx">Fichier GPX</label>
+      <input type="text" id="f-gpx" placeholder="…/parcours.gpx" style="flex:1">
+      <button class="btn btn-sm" onclick="pickGpx()">…</button>
+    </div>
+    <div class="row">
+      <label class="lbl" data-i18n="f.date">Date de départ</label>
+      <input type="date" id="f-date" class="inp-mid">
+      <label class="lbl tiny" style="margin-left:14px" data-i18n="f.time">Heure</label>
+      <select id="f-time" class="inp-mid"></select>
+    </div>
+   </div>
+  </div>
+
+  <!-- DEM source -->
+  <div class="section sec-dem">
+   <div class="section-hd" data-i18n="sec.dem">Modèle de données d'altitude (DEM)</div>
+   <div class="section-body">
+    <div class="row" id="dem-radios"></div>
+   </div>
+  </div>
+
+  <!-- Modes (déplacé sous le DEM : on choisit d'abord le type d'analyse ;
+       la 2e ligne, liée à l'ombre, se masque en mode Pente) -->
+  <div class="section sec-modes">
+   <div class="section-hd" data-i18n="sec.modes">Modes</div>
+   <div class="section-body">
+    <div class="row">
+      <label class="lbl" data-i18n="f.kmltype">Type d'analyse KML</label>
+      <div class="seg">
+        <input type="radio" name="analysis" id="an-ombre" value="ombre_soleil"><label for="an-ombre" data-i18n="an.ombre">Ombre / Soleil</label>
+        <input type="radio" name="analysis" id="an-pente" value="pente"><label for="an-pente" data-i18n="an.pente">Pente (depuis MNT)</label>
+      </div>
+    </div>
+    <div class="row shadow-only">
+      <label class="lbl" data-i18n="f.shadowcalc">Calcul d'ombre</label>
+      <div class="seg">
+        <input type="radio" name="shadow" id="sh-relief" value="relief"><label for="sh-relief" data-i18n="sh.relief">Relief seul</label>
+        <input type="radio" name="shadow" id="sh-veg"    value="vegetation"><label for="sh-veg" data-i18n="sh.veg">Végétation seule</label>
+        <input type="radio" name="shadow" id="sh-both"   value="both"><label for="sh-both" data-i18n="both">Les deux</label>
+      </div>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.dir">Sens du parcours</label>
+      <div class="seg">
+        <input type="radio" name="direction" id="di-cw"   value="CW"><label for="di-cw" data-i18n="di.cw">Horaire</label>
+        <input type="radio" name="direction" id="di-ccw"  value="CCW"><label for="di-ccw" data-i18n="di.ccw">Anti-horaire</label>
+        <input type="radio" name="direction" id="di-both" value="both"><label for="di-both" data-i18n="both">Les deux</label>
+      </div>
+    </div>
+    <div class="row slope-only">
+      <label class="cb"><input type="checkbox" id="f-show-slope-arrows"> <span data-i18n="f.slopearrows">Flèches de sens sur la trace</span></label>
+    </div>
+   </div>
+  </div>
+
+  <!-- Options de simulation (numériques) -->
+  <div class="section sec-params">
+   <div class="section-hd" data-i18n="sec.params">Options de simulation</div>
+   <div class="section-body">
+    <div class="row">
+      <label class="lbl" data-i18n="f.res">Résolution analyse (m)</label>
+      <input type="number" id="f-analysis-resolution" step="0.5" min="0.5" class="inp-short">
+      <span class="hint slope-only" data-i18n="hint.slopewin">= fenêtre de lissage de la pente</span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.maxdist">Distance max. ombre (m)</label>
+      <input type="number" id="f-max-distance" step="100" min="100" class="inp-short"></span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.margin">Marge bbox (m)</label>
+      <input type="number" id="f-margin-meters" step="100" min="0" class="inp-short"></span>
+    </div>
+    <div class="row">
+      <span class="fld shadow-only"><label class="lbl" data-i18n="f.batch">Taille des lots (batch)</label>
+      <input type="number" id="f-batch-size" step="1" min="1" class="inp-short"></span>
+      <span class="fld shadow-only"><label class="lbl short" style="margin-left:14px" data-i18n="f.workers">Workers (parallèle)</label>
+      <input type="number" id="f-num-workers" step="1" min="1" max="32" class="inp-short"></span>
+      <label class="lbl short" style="margin-left:14px" data-i18n="f.ptint">Intervalle pts (min)</label>
+      <input type="number" id="f-passage-interval" step="1" min="0" class="inp-short">
+      <span class="hint" data-i18n="hint.none">0 = aucun</span>
+    </div>
+    <div class="row shadow-only">
+      <label class="lbl" data-i18n="f.solarstep">Pas solaire (s) — cache</label>
+      <select id="f-solar-step" class="inp-short">
+        <option value="10">10</option>
+        <option value="30">30</option>
+        <option value="60">60</option>
+        <option value="120">120</option>
+        <option value="300">300</option>
+      </select>
+      <span class="hint" data-i18n="hint.solarstep">Ex : 60 (rapide), 10 (précis)</span>
+    </div>
+   </div>
+  </div>
+
+  <!-- Sorties / options annexes -->
+  <div class="section sec-out">
+   <div class="section-hd" data-i18n="sec.out">Sorties &amp; visualisations</div>
+   <div class="section-body">
+    <div class="cb-group">
+      <label><input type="checkbox" id="f-open-gpx"> <span data-i18n="out.openkml">Ouvrir le KML résultat après calcul</span></label>
+      <label><input type="checkbox" id="f-visualize-tiles"> <span data-i18n="out.tiles">Visualiser les tuiles (KML)</span></label>
+      <label class="shadow-only"><input type="checkbox" id="f-generate-shadow-map"> <span data-i18n="out.shadowmap">Générer carte d'ombre (GeoTIFF)</span></label>
+    </div>
+    <div class="row shadow-only">
+      <label class="cb"><input type="checkbox" id="f-visualize-sun-rays"> <span data-i18n="out.sunrays">Visualiser rayons solaires (KML)</span></label>
+      <label class="lbl tiny" style="margin-left:14px" data-i18n="f.rayint">Intervalle rayons</label>
+      <input type="number" id="f-sun-ray-interval" step="1" min="1" class="inp-short">
+    </div>
+   </div>
+  </div>
+
+  <!-- Légendes -->
+  <div class="section sec-legend">
+   <div class="section-hd" data-i18n="sec.legend">Légendes</div>
+   <div class="section-body">
+    <div class="legends-row">
+      <div class="legend-card" id="legend-kml">
+        <h4 data-i18n="leg.kml">Couleurs KML — Ombre/Soleil</h4>
+        <div class="legend-items"></div>
+      </div>
+      <div class="legend-card hidden" id="legend-slope">
+        <h4 data-i18n="leg.slope">Couleurs KML — Pentes (abs)</h4>
+        <div class="legend-items"></div>
+      </div>
+      <div class="legend-card hidden" id="legend-tile">
+        <h4 data-i18n="leg.tile">Tuiles (visualisation)</h4>
+        <div class="legend-items"></div>
+      </div>
+    </div>
+   </div>
+  </div>
+
+</div>
+</div>
+
+<!-- Panneau historique (latéral droit, caché par défaut) -->
+<div id="panneau-hist" class="hidden">
+  <div class="hist-header">
+    <strong data-i18n="hist.title">⏱ Historique des calculs</strong>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn-sm" onclick="viderHistorique()" data-i18n="clear"
+              style="background:transparent;border:1px solid var(--red);color:var(--red)">🗑 Vider</button>
+      <button class="btn-sm" onclick="toggleHistorique()"
+              style="background:transparent;border:none;font-size:16px">✕</button>
+    </div>
+  </div>
+  <div id="hist-list"></div>
+</div>
+
+<!-- Panneau de log (caché par défaut) -->
+<div id="panneau-log" class="hidden">
+  <div id="log-resize-handle"></div>
+  <div id="log-header">
+    <strong>📋 Logs</strong>
+    <span id="log-status" style="color:var(--dim)" data-i18n="log.ready">Prêt</span>
+    <div class="log-actions">
+      <button onclick="viderLog()" data-i18n="clear">🗑 Vider</button>
+      <button onclick="copierLog()" data-i18n="log.copy">⎘ Copier</button>
+      <button onclick="toggleLogPanel()" data-i18n-title="log.hidetip" title="Masquer (ré-affichable via le bouton Logs)">✕</button>
+    </div>
+  </div>
+  <div id="log-progress"><div id="log-progress-bar"></div></div>
+  <div id="log-content"></div>
+</div>
+
+<!-- Modale d'aide -->
+<div id="help-modal" onclick="if(event.target===this)fermerAide()">
+  <div class="inner">
+    <h3 data-i18n="help.title">Aide — Simu Rando Solaire</h3>
+    <div id="help-body" data-i18n="help.body"></div>
+    <div class="close"><button class="btn btn-sm" onclick="fermerAide()" data-i18n="close">Fermer</button></div>
+  </div>
+</div>
+
+<script>
+/*__INIT_DATA__*/
+//__GPXSOLAR_JS__
+</script>
+</body>
+</html>
