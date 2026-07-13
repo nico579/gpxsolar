@@ -1054,8 +1054,15 @@ def _bilinear_sample_raster(data_arr, rows_f, cols_f, nodata=-9999, fallback=0.0
 
     Args:
         data_arr : np.ndarray 2D (H, W)
-        rows_f, cols_f : np.ndarray float64 — indices de pixel (peuvent être
-            fractionnaires). Les points hors-bornes reçoivent `fallback`.
+        rows_f, cols_f : np.ndarray float64 — indices de pixel en convention
+            CENTRES : le centre du pixel (i, j) est à (i, j). Un appelant qui
+            part d'une transform rasterio (convention coins : ~transform donne
+            (0.5, 0.5) au centre du premier pixel) doit donc retrancher 0.5.
+            Sans ce décalage, l'échantillon au centre exact d'un pixel
+            moyennait les 4 cellules voisines au lieu de rendre la valeur de
+            la cellule (biais systématique d'un demi-pixel, ~15 m sur un DEM
+            30 m). Les points hors du footprint [-0.5, dim-0.5] reçoivent
+            `fallback`.
         nodata : valeur sentinelle ; si l'un des 4 voisins est nodata, on
             retombe sur le voisin entier (NN) ou `fallback` si lui aussi.
         fallback : valeur par défaut (typiquement 0.0).
@@ -1068,26 +1075,27 @@ def _bilinear_sample_raster(data_arr, rows_f, cols_f, nodata=-9999, fallback=0.0
         return out
 
     h, w = data_arr.shape
-    r0 = np.floor(rows_f).astype(np.int32)
-    c0 = np.floor(cols_f).astype(np.int32)
-    fy = (rows_f - r0).astype(np.float64)
-    fx = (cols_f - c0).astype(np.float64)
-
-    # Bord de raster : r0+1/c0+1 sont CLAMPÉS dans la grille au lieu
-    # d'invalider le point. L'ancien test (r1 < h) excluait la dernière
+    # Domaine valide en convention CENTRES : le footprint de la tuile couvre
+    # [-0.5, dim-0.5]. La première/dernière demi-cellule (indices dans
+    # [-0.5, 0) ou (dim-1, dim-0.5]) est CLAMPÉE sur la grille (extension de
+    # bord) au lieu d'invalider le point : un test strict excluait la dernière
     # demi-cellule de chaque tuile → fallback 0.0 : bande d'altitude 0 le
     # long des coutures de tuiles (ombres sous-détectées, et pente Tobler
-    # aberrante si un point de trace y tombait). Avec r1 == r0 les poids
+    # aberrante si un point de trace y tombait). Avec le clip, les poids
     # bilinéaires dégénèrent proprement vers le voisin existant.
-    valid = (r0 >= 0) & (r0 < h) & (c0 >= 0) & (c0 < w)
-    r1 = np.minimum(r0 + 1, h - 1)
-    c1 = np.minimum(c0 + 1, w - 1)
+    valid = ((rows_f >= -0.5) & (rows_f <= h - 0.5) &
+             (cols_f >= -0.5) & (cols_f <= w - 0.5))
     if not np.any(valid):
         return out
 
-    r0v = r0[valid]; c0v = c0[valid]
-    r1v = r1[valid]; c1v = c1[valid]
-    fxv = fx[valid]; fyv = fy[valid]
+    rows_c = np.clip(rows_f[valid], 0.0, float(h - 1))
+    cols_c = np.clip(cols_f[valid], 0.0, float(w - 1))
+    r0v = np.floor(rows_c).astype(np.int32)
+    c0v = np.floor(cols_c).astype(np.int32)
+    fyv = rows_c - r0v
+    fxv = cols_c - c0v
+    r1v = np.minimum(r0v + 1, h - 1)
+    c1v = np.minimum(c0v + 1, w - 1)
 
     q00 = data_arr[r0v, c0v].astype(np.float64)
     q01 = data_arr[r0v, c1v].astype(np.float64)
@@ -1505,7 +1513,13 @@ def solar_altaz_cached(lat, lon, dtutc, step_s=SOLAR_ROUND_SEC):
     lat_q = _q_coord(lat)
     lon_q = _q_coord(lon)
     ts_q  = _q_time(dtutc, step_s=step_s)
-    key = (float(lat_q), float(lon_q), int(ts_q))
+    # step_s fait partie de la clé : les multiples de 600 s sont aussi des
+    # multiples de 60 s, donc dans un même process mélangeant les deux pas
+    # (moteur à --solar-step-s 60, préchargement corridor et rayons KML au
+    # défaut 600) une entrée quantifiée à 600 s pouvait servir une valeur
+    # calculée jusqu'à ~10 min de l'heure demandée — vidant de son sens le
+    # pas fin demandé au moteur.
+    key = (float(lat_q), float(lon_q), int(ts_q), int(step_s))
 
     v = SOLAR_CACHE.get(key)
     if v is not None:
@@ -1555,7 +1569,9 @@ def solar_altaz_cached_vec(lats, lons, ts, step_s=SOLAR_ROUND_SEC):
     u_alts = np.empty(len(uniq), dtype=np.float64)
     u_azs  = np.empty(len(uniq), dtype=np.float64)
     for k in range(len(uniq)):
-        key = (float(uniq[k, 0]), float(uniq[k, 1]), int(uniq[k, 2]))
+        # step_i dans la clé : cf. solar_altaz_cached (contamination croisée
+        # entre pas 60 s et 600 s au sein d'un même process sinon).
+        key = (float(uniq[k, 0]), float(uniq[k, 1]), int(uniq[k, 2]), step_i)
         v = SOLAR_CACHE.get(key)
         if v is None:
             i = int(first_idx[k])   # représentant : coordonnées/temps ORIGINAUX
@@ -1935,6 +1951,17 @@ class LidarManager:
         self.downloaded_tiles = set()  # Tuiles téléchargées
         self.used_tiles = set()  # Tuiles effectivement utilisées pour le ray-tracing
 
+        # Couverture altimétrique : compte les échantillons servis SANS donnée
+        # réelle (tuile absente/illisible, pixel nodata, point hors grille),
+        # laissés à 0 m. 0 m étant une altitude légitime, elle ne peut pas
+        # servir de sentinelle : sans ces compteurs, une couverture incomplète
+        # produit un relief plat plausible en apparence (ombres sous-détectées,
+        # pentes fausses) sans aucun signal. Agrégés en fin de calcul par
+        # HGTDataManager.coverage_report().
+        self._cov_lock = threading.Lock()
+        self.cov_missing = 0
+        self.cov_total = 0
+
         # Session HTTP PARTAGÉE + pool de connexions : sans elle, chaque tuile
         # rouvrait une connexion TCP + poignée TLS (plusieurs aller-retours au
         # serveur), coût payé à CHAQUE dalle. La Session garde les connexions
@@ -2302,14 +2329,17 @@ class LidarManager:
                         tiles_by_layer[k][(tx, ty)] = tile
 
         # --- Extraction lock-free (références capturées, data read-only) ---
+        cov_miss = 0   # échantillons laissés à 0 m faute de donnée (cf. __init__)
         for k in present_layers:
             elevs = out[k]
             layer_tiles = tiles_by_layer[k]
             for unique_idx, (tx, ty) in enumerate(unique_tiles):
+                mask = (inverse_indices == unique_idx)
                 tile = layer_tiles.get((tx, ty))
                 if tile is None:
+                    # Tuile absente/illisible : points laissés à 0 m.
+                    cov_miss += int(np.count_nonzero(mask))
                     continue
-                mask = (inverse_indices == unique_idx)
                 xs_tile = xs[mask]
                 ys_tile = ys[mask]
                 if xs_tile.size == 0:
@@ -2321,12 +2351,19 @@ class LidarManager:
                 cols = cols_f.astype(np.int32)
                 h, w = data.shape
                 valid_mask = (rows >= 0) & (rows < h) & (cols >= 0) & (cols < w)
+                cov_miss += int(xs_tile.size - np.count_nonzero(valid_mask))
                 if not np.any(valid_mask):
                     continue
                 vals = data[rows[valid_mask], cols[valid_mask]].astype(float)
-                vals[vals == nodata] = 0.0
+                nd_mask = (vals == nodata)
+                if np.any(nd_mask):
+                    cov_miss += int(np.count_nonzero(nd_mask))
+                    vals[nd_mask] = 0.0
                 output_indices = np.where(mask)[0][valid_mask]
                 elevs[output_indices] = vals
+        with self._cov_lock:
+            self.cov_missing += cov_miss
+            self.cov_total += n * len(present_layers)
         return out
 
     def get_values_vec(self, layer_key, lats, lons):
@@ -2374,6 +2411,13 @@ class HGTDataManager:
         self.hgt_rasters = LRUTileCache(max_size=self.MAX_CACHE_SIZE_HGT) # Cache LRU pour les données raster des tuiles HGT (clé: tile_key, valeur: {data, transform, nodata})
         self.hgt_rasters.eviction_callback = self._handle_hgt_eviction
         self.hgt_tile_metadata = {} # Stocke les métadonnées (path, bounds) des tuiles HGT sur disque (clé: tile_key)
+
+        # Couverture altimétrique (cf. LidarManager.__init__) : échantillons
+        # servis à 0 m faute de donnée. coverage_report() agrège ces compteurs
+        # avec ceux des managers délégués (LiDAR/WMS).
+        self._cov_lock = threading.Lock()
+        self.cov_missing = 0
+        self.cov_total = 0
 
         source_info = self.SOURCES.get(self.source, {})
         self.resolution = source_info.get('resolution', 30)
@@ -2602,8 +2646,15 @@ class HGTDataManager:
             return self.wms_dem.get_values_vec('mnt', lats, lons)
         
         if self.source == 'srtm1' and self.srtm_data:
-            elevs = [(self.srtm_data.get_elevation(lat, lon) or 0) for lat, lon in zip(lats, lons)]
-            return np.array(elevs)
+            # get_elevation → None hors donnée : compté pour coverage_report.
+            # (L'ancien `or 0` confondait au passage une vraie altitude 0.0
+            # avec « pas de donnée », sans la compter nulle part.)
+            raw = [self.srtm_data.get_elevation(lat, lon) for lat, lon in zip(lats, lons)]
+            n_miss = sum(1 for v in raw if v is None)
+            with self._cov_lock:
+                self.cov_missing += n_miss
+                self.cov_total += len(raw)
+            return np.array([0.0 if v is None else float(v) for v in raw])
         
         if self.source == 'copernicus':
             # Implémenter _get_copernicus_elevations_vec
@@ -2617,6 +2668,20 @@ class HGTDataManager:
         # Bug fix : self.get_ground_elevation n'existait pas → AttributeError.
         elevs = [self.get_elevation(lat, lon) for lat, lon in zip(lats, lons)]
         return np.array(elevs)
+
+    def coverage_report(self):
+        """(échantillons sans donnée réelle, échantillons servis), agrégé sur
+        les compteurs propres et ceux des managers délégués (LiDAR/WMS).
+        Les points sans donnée reçoivent 0 m, plausible en apparence (relief
+        plat, ombres sous-détectées) : ces compteurs sont le seul signal."""
+        with self._cov_lock:
+            miss, tot = self.cov_missing, self.cov_total
+        for mgr in (self.lidar_manager, self.wms_dem):
+            if mgr is not None:
+                with mgr._cov_lock:
+                    miss += mgr.cov_missing
+                    tot += mgr.cov_total
+        return miss, tot
 
     def get_object_heights_vec(self, lats, lons):
         """Méthode vectorielle pour la hauteur des objets/végétation."""
@@ -3039,6 +3104,10 @@ class HGTDataManager:
         else: return data_arr[row, col]
     def _get_copernicus_elevations_vec(self, lats, lons):
         if not RASTERIO_AVAILABLE:
+            n_pts = int(np.asarray(lats).size)
+            with self._cov_lock:
+                self.cov_missing += n_pts
+                self.cov_total += n_pts
             return np.zeros_like(lats, dtype=np.float64)
 
         elevations = np.zeros_like(lats, dtype=np.float64)
@@ -3060,6 +3129,7 @@ class HGTDataManager:
                 self._load_copernicus_tile_to_ram(tile_key)
 
         # 4. Extraire les élévations, tuile par tuile
+        n_miss = 0   # échantillons laissés à 0 m faute de donnée (cf. coverage_report)
         for i, (lat_t, lon_t) in enumerate(unique_tile_coords):
             # Même helper que le téléchargement : clé garantie cohérente
             tile_key = ('copernicus', self.copernicus_tile_filename(lat_t, lon_t))
@@ -3067,7 +3137,9 @@ class HGTDataManager:
             tile_data = self.hgt_rasters.get(tile_key)
             
             if tile_data is None:
-                continue  # Tuile non chargée, on laisse l'élévation à 0
+                # Tuile non chargée : points laissés à 0 m, comptés manquants.
+                n_miss += int(np.count_nonzero(inverse_indices == i))
+                continue
 
             # Marquer la tuile comme utilisée pour la visualisation KML
             metadata = self.hgt_tile_metadata.get(tile_key)
@@ -3094,7 +3166,9 @@ class HGTDataManager:
             nodata = tile_data['nodata']
 
             if self.interpolation == 'bilinear':
-                vals = _bilinear_sample_raster(data_arr, rows_f, cols_f,
+                # -0.5 : indices coins (~transform) → indices centres,
+                # cf. _bilinear_sample_raster.
+                vals = _bilinear_sample_raster(data_arr, rows_f - 0.5, cols_f - 0.5,
                                                 nodata=nodata, fallback=0.0)
                 elevations[np.where(mask)[0]] = vals
             else:
@@ -3104,15 +3178,22 @@ class HGTDataManager:
                 h, w = data_arr.shape
                 valid_mask_in_tile = (rows_int >= 0) & (rows_int < h) & \
                                      (cols_int >= 0) & (cols_int < w)
+                n_miss += int(lats_tile.size - np.count_nonzero(valid_mask_in_tile))
                 if not np.any(valid_mask_in_tile):
                     continue
                 valid_rows = rows_int[valid_mask_in_tile]
                 valid_cols = cols_int[valid_mask_in_tile]
                 vals = data_arr[valid_rows, valid_cols].astype(np.float64)
-                vals[vals == nodata] = 0.0
+                nd_mask = (vals == nodata)
+                if np.any(nd_mask):
+                    n_miss += int(np.count_nonzero(nd_mask))
+                    vals[nd_mask] = 0.0
                 output_indices = np.where(mask)[0][valid_mask_in_tile]
                 elevations[output_indices] = vals
 
+        with self._cov_lock:
+            self.cov_missing += n_miss
+            self.cov_total += int(elevations.size)
         return elevations
     
     def _get_ign_elevations_vec(self, lats, lons):
@@ -3211,7 +3292,9 @@ class HGTDataManager:
                 nodata = h_header.get('nodata_value', -99999)
 
                 if self.interpolation == 'bilinear':
-                    vals = _bilinear_sample_raster(data_arr, row_fs, col_fs,
+                    # -0.5 : indices coins (xllcorner/ymax) → indices centres,
+                    # cf. _bilinear_sample_raster.
+                    vals = _bilinear_sample_raster(data_arr, row_fs - 0.5, col_fs - 0.5,
                                                     nodata=nodata, fallback=0.0)
                     original_indices_for_these_points = np.where(mask_for_grid_cell)[0][np.array(local_indices)]
                     elevations[original_indices_for_these_points] = vals
@@ -3432,87 +3515,98 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
         return [STATUS_MAP_INV[s] for s in statuses], shadow_hits
 
     # 3. Préparer les données pour les points valides uniquement
-    sun_azs = sun_azs_full[valid_mask]
-    rad_alts = np.deg2rad(sun_alts[valid_mask])
-    rad_azs = np.deg2rad(sun_azs)
-    cos_azs = np.cos(rad_azs)
-    sin_azs = np.sin(rad_azs)
+    valid_idx = np.where(valid_mask)[0]
+    obs_lats_all = lats[valid_idx]
+    obs_lons_all = lons[valid_idx]
+    sun_alts_all = sun_alts[valid_idx]
+    sun_azs_all  = sun_azs_full[valid_idx]
 
     # 4. Préparer le Ray-Tracing vectorisé
     step = hgt_manager.step
     max_dist = hgt_manager.max_distance
     distances = adaptive_distances(max_dist, initial_step=step)
 
-    observer_lats = lats[valid_mask]
-    observer_lons = lons[valid_mask]
-    observer_ground_elevs = hgt_manager.get_ground_elevations_vec(observer_lats, observer_lons)
-    ray_start_altitudes = observer_ground_elevs + OBSERVER_EYE_HEIGHT
-
-    # 5. Calculer les coordonnées 3D de tous les points de tous les rayons via broadcasting
-    m_per_deg_lat_vec, m_per_deg_lon_vec = get_meters_per_degree_wgs84_vec(observer_lats)
-    d_lat = (distances[None, :] * cos_azs[:, None]) / m_per_deg_lat_vec[:, None]
-    d_lon = (distances[None, :] * sin_azs[:, None]) / m_per_deg_lon_vec[:, None]
-
-    ray_lats = observer_lats[:, None] + d_lat
-    ray_lons = observer_lons[:, None] + d_lon
-    ray_altitudes = ray_start_altitudes[:, None] + distances[None, :] * np.tan(rad_alts)[:, None] + distances[None, :]**2 / (2 * EARTH_RADIUS)
-
-    # 6. Obtenir le profil d'altitude du terrain et des obstacles
-    #    (sol + objets en une passe : partage projection + tuiles en LiDAR)
-    flat_lats = ray_lats.ravel()
-    flat_lons = ray_lons.ravel()
-    ground_flat, object_flat = hgt_manager.get_ground_and_object_elevations_vec(flat_lats, flat_lons)
-    ground_profile = ground_flat.reshape(ray_lats.shape)
-    object_heights = object_flat.reshape(ray_lats.shape)
-
-    # Appliquer le shadow_mode à la SOURCE du ray-tracing
     shadow_mode = getattr(hgt_manager, 'shadowmode', 'both')  # Récupérer le mode depuis hgtmanager
-    if shadow_mode == 'relief':
-        object_heights = np.zeros_like(object_heights)  # Ignorer toute végétation
-    elif shadow_mode == 'vegetation':
-        # Aplatir le terrain à l'altitude de l'observateur pour ignorer le relief
-        ground_profile = np.full_like(ground_profile, observer_ground_elevs[:, None])
-
-    obstacle_profile = ground_profile + object_heights
-
-    # 7. Comparaison vectorisée (pour inclure RELIEF_VEG).
-    # compute_ray_intersections_detailed pointe vers le fallback NumPy ou le
-    # kernel Numba selon _try_load_numba — le rebind global fait l'aiguillage
-    # (l'ancien if/else re-dupliquait le fallback inline).
     TOLERANCE = 0.1
-    relief_is_blocking, veg_is_blocking = compute_ray_intersections_detailed(
-        obstacle_profile, ground_profile, object_heights, ray_altitudes, TOLERANCE
-    )
 
-    # 8. Mettre à jour les statuts (avec les codes uint8)
-    temp_statuses = np.zeros(len(observer_lats), dtype=np.uint8) # 0 = SUN
-    temp_statuses[veg_is_blocking] = 2 # VEGETATION
-    temp_statuses[relief_is_blocking] = 1 # RELIEF
-    temp_statuses[relief_is_blocking & veg_is_blocking] = 3 # RELIEF_VEG
-    
-    np.put(statuses, np.where(valid_mask)[0], temp_statuses)
+    # Sous-lots par BUDGET MÉMOIRE : chaque point matérialise len(distances)
+    # échantillons dans ~8 tableaux float64 (rayons lat/lon/alt, profils
+    # sol/objets/obstacles + temporaires). Sans borne, un bloc de carte
+    # 256×256 en LiDAR (pas 0,5 m, portée 1 000 m → 441 échantillons) montait
+    # à ~1,8 Go, multiplié par num_workers (défaut cpu_count) → OOM/swap.
+    # 2 M d'éléments ≈ 16 Mo par tableau float64, soit ~150 Mo de pic par
+    # worker. Pour la config standard 5 m / 1 000 m (44 échantillons) le lot
+    # reste ≥ 45 000 points : surcoût de boucle négligeable.
+    RAY_BUDGET_ELEMENTS = 2_000_000
+    chunk_pts = max(1, RAY_BUDGET_ELEMENTS // max(1, int(distances.size)))
 
-    # 9. VECTORIZE shadow hit calculation
-    all_rays_blocking_mask = obstacle_profile > (ray_altitudes + TOLERANCE)
-    any_block_per_ray = np.any(all_rays_blocking_mask, axis=1)
-    
-    if np.any(any_block_per_ray):
-        # Indices des rayons qui sont bloqués
-        blocked_ray_indices = np.where(any_block_per_ray)[0] # Corrected variable name
-        
-        # Pour ces rayons, trouver le premier point de blocage
-        first_block_indices = np.argmax(all_rays_blocking_mask[blocked_ray_indices], axis=1)
-        
-        # Coordonnées des points de "hit"
-        hit_lats = ray_lats[blocked_ray_indices, first_block_indices]
-        hit_lons = ray_lons[blocked_ray_indices, first_block_indices]
-        
-        # Indices originaux dans le batch (correspondent à la position des points dans `hit_lats_full` et `hit_lons_full`)
-        original_indices = np.where(valid_mask)[0][blocked_ray_indices]
-        
-        # Directly place the results in the full-sized arrays
-        hit_lats_full[original_indices] = hit_lats
-        hit_lons_full[original_indices] = hit_lons
+    temp_statuses = np.zeros(valid_idx.size, dtype=np.uint8)  # 0 = SUN
+
+    for cs in range(0, valid_idx.size, chunk_pts):
+        sl = slice(cs, min(cs + chunk_pts, valid_idx.size))
+        observer_lats = obs_lats_all[sl]
+        observer_lons = obs_lons_all[sl]
+        rad_alts = np.deg2rad(sun_alts_all[sl])
+        rad_azs = np.deg2rad(sun_azs_all[sl])
+        cos_azs = np.cos(rad_azs)
+        sin_azs = np.sin(rad_azs)
+
+        observer_ground_elevs = hgt_manager.get_ground_elevations_vec(observer_lats, observer_lons)
+        ray_start_altitudes = observer_ground_elevs + OBSERVER_EYE_HEIGHT
+
+        # 5. Calculer les coordonnées 3D de tous les points de tous les rayons via broadcasting
+        m_per_deg_lat_vec, m_per_deg_lon_vec = get_meters_per_degree_wgs84_vec(observer_lats)
+        d_lat = (distances[None, :] * cos_azs[:, None]) / m_per_deg_lat_vec[:, None]
+        d_lon = (distances[None, :] * sin_azs[:, None]) / m_per_deg_lon_vec[:, None]
+
+        ray_lats = observer_lats[:, None] + d_lat
+        ray_lons = observer_lons[:, None] + d_lon
+        ray_altitudes = ray_start_altitudes[:, None] + distances[None, :] * np.tan(rad_alts)[:, None] + distances[None, :]**2 / (2 * EARTH_RADIUS)
+
+        # 6. Obtenir le profil d'altitude du terrain et des obstacles
+        #    (sol + objets en une passe : partage projection + tuiles en LiDAR)
+        ground_flat, object_flat = hgt_manager.get_ground_and_object_elevations_vec(
+            ray_lats.ravel(), ray_lons.ravel())
+        ground_profile = ground_flat.reshape(ray_lats.shape)
+        object_heights = object_flat.reshape(ray_lats.shape)
+
+        # Appliquer le shadow_mode à la SOURCE du ray-tracing
+        if shadow_mode == 'relief':
+            object_heights = np.zeros_like(object_heights)  # Ignorer toute végétation
+        elif shadow_mode == 'vegetation':
+            # Aplatir le terrain à l'altitude de l'observateur pour ignorer le relief
+            ground_profile = np.full_like(ground_profile, observer_ground_elevs[:, None])
+
+        obstacle_profile = ground_profile + object_heights
+
+        # 7. Comparaison vectorisée (pour inclure RELIEF_VEG).
+        # compute_ray_intersections_detailed pointe vers le fallback NumPy ou le
+        # kernel Numba selon _try_load_numba — le rebind global fait l'aiguillage
+        # (l'ancien if/else re-dupliquait le fallback inline).
+        relief_is_blocking, veg_is_blocking = compute_ray_intersections_detailed(
+            obstacle_profile, ground_profile, object_heights, ray_altitudes, TOLERANCE
+        )
+
+        # 8. Statuts du lot (codes uint8)
+        chunk_statuses = np.zeros(observer_lats.size, dtype=np.uint8) # 0 = SUN
+        chunk_statuses[veg_is_blocking] = 2 # VEGETATION
+        chunk_statuses[relief_is_blocking] = 1 # RELIEF
+        chunk_statuses[relief_is_blocking & veg_is_blocking] = 3 # RELIEF_VEG
+        temp_statuses[sl] = chunk_statuses
+
+        # 9. Empreintes d'ombre : premier point bloquant de chaque rayon
+        all_rays_blocking_mask = obstacle_profile > (ray_altitudes + TOLERANCE)
+        any_block_per_ray = np.any(all_rays_blocking_mask, axis=1)
+
+        if np.any(any_block_per_ray):
+            blocked_ray_indices = np.where(any_block_per_ray)[0]
+            first_block_indices = np.argmax(all_rays_blocking_mask[blocked_ray_indices], axis=1)
+            # Indices originaux dans le batch complet
+            original_indices = valid_idx[sl][blocked_ray_indices]
+            hit_lats_full[original_indices] = ray_lats[blocked_ray_indices, first_block_indices]
+            hit_lons_full[original_indices] = ray_lons[blocked_ray_indices, first_block_indices]
+
+    np.put(statuses, valid_idx, temp_statuses)
 
     # Create the final list of tuples from the arrays
     shadow_hits = [(lat, lon) if not np.isnan(lat) else None 
@@ -3551,7 +3645,23 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
 
     alllats = np.array([p.latitude for p in simpoints], dtype=np.float64)
     alllons = np.array([p.longitude for p in simpoints], dtype=np.float64)
+    cov_miss_before = hgtmanager.coverage_report()[0]
     allelevations = hgtmanager.get_ground_elevations_vec(alllats, alllons)
+    trace_missing = hgtmanager.coverage_report()[0] - cov_miss_before
+    if trace_missing > 0:
+        # 0 m n'est pas une sentinelle fiable (altitude réelle possible) : on
+        # s'appuie sur les compteurs de couverture des fournisseurs. Trace
+        # majoritairement hors donnée → pentes, Tobler et ombres absurdes
+        # garantis : on refuse au lieu de produire un résultat plausible en
+        # apparence. Couverture partielle → avertissement explicite.
+        if trace_missing * 2 >= totalpoints:
+            raise MissingDataError(
+                f"{trace_missing}/{totalpoints} points de trace sans donnée "
+                f"altimétrique (tuiles manquantes ou zone hors couverture). "
+                f"Choisissez une autre source DEM ou vérifiez la zone.")
+        logfunc(f"⚠ {trace_missing}/{totalpoints} points de trace sans donnée "
+                f"altimétrique : altitude 0 m utilisée (pente et durées "
+                f"faussées localement).")
 
     # === (B) Pré-calcul distances entre points consécutifs (N-1 segments) ===
     # Pour ~10 m, equirect est parfait; sinon remplace equirect_m_vec par haversine_m_vec.
@@ -3566,23 +3676,30 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
     # cumul temporel via np.cumsum (séquentiel mais O(N) sans appel Python).
     slope_ratios = np.zeros(totalpoints, dtype=np.float64)
     if totalpoints >= 2:
-        # Fenêtre de lissage en distance (mode pente) : la pente entre deux
-        # points GPS consécutifs (souvent 1-3 m) est dominée par le bruit
-        # d'échantillonnage du MNT. On la mesure sur une sécante de
-        # `analysis_resolution` mètres — idée reprise de colorer_pente (lissage
-        # EN DISTANCE, insensible à la densité variable des points GPS). En mode
-        # ombre on garde le calcul point-à-point historique : Tobler inchangé,
-        # run témoin bit-identique.
-        window_m = float(getattr(hgtmanager, "analysis_resolution", 0.0) or 0.0)
-        if (not compute_shadows) and window_m > 0.0:
+        # Fenêtre de lissage en distance : la pente entre deux points GPS
+        # consécutifs (souvent 1-3 m) est dominée par le bruit
+        # d'échantillonnage du MNT. On la mesure sur une sécante de `window_m`
+        # mètres (idée reprise de colorer_pente : lissage EN DISTANCE,
+        # insensible à la densité variable des points GPS).
+        # Mode pente : fenêtre = analysis_resolution (choix utilisateur).
+        # Mode ombre : fenêtre = résolution du MNT. En dessous de la taille de
+        # cellule, la « pente » n'est que du bruit d'interpolation : sur SRTM
+        # 30 m elle dépassait ±75 % par endroits et, via le plancher Tobler
+        # 0,1 m/s, gonflait la durée du run témoin de 0:45 à 1:27. (En LiDAR
+        # 0,5 m la fenêtre dégénère en sécante i-1/i+1, quasi point-à-point :
+        # cohérent, la donnée y est fiable à cette échelle.)
+        if compute_shadows:
+            window_m = float(getattr(hgtmanager, "resolution", 0.0) or 0.0)
+        else:
+            window_m = float(getattr(hgtmanager, "analysis_resolution", 0.0) or 0.0)
+        if window_m > 0.0:
             # Pipeline de colorer_pente (les deux étapes, fenêtre EN DISTANCE,
             # insensible à la densité des points GPS) :
             #  1. lisser l'ALTITUDE par moyenne glissante (lisser_en_distance) ;
             #  2. pente = SÉCANTE sur la fenêtre du profil lissé (pentes_en_distance).
             # Dériver un profil lissé par une sécante (et non point-à-point sur
             # ~10 m) donne un lissage MONOTONE : une fenêtre plus large réduit
-            # toujours le bruit. En mode ombre : calcul point-à-point historique
-            # (Tobler inchangé, run témoin bit-identique).
+            # toujours le bruit.
             cumdist = np.concatenate(([0.0], np.cumsum(seg_dists_m[:-1])))
             half = max(window_m / 2.0, 1.0)
             # 1. altitude lissée
@@ -3611,8 +3728,13 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
 
     # Tobler vectorisé : (6 * exp(-3.5 * |slope+0.05|)) / 3.6 [m/s]
     speeds_ms = (6.0 * np.exp(-3.5 * np.abs(slope_ratios + 0.05))) / 3.6
-    valid_seg = (seg_dists_m > 0.0) & (speeds_ms > 0.1)
-    seg_durs_s = np.where(valid_seg, seg_dists_m / np.maximum(speeds_ms, 0.1), 0.0)
+    # Plancher de vitesse 0,1 m/s appliqué à TOUT segment de distance > 0.
+    # L'ancien code INVALIDAIT le segment (durée 0) dès que Tobler passait
+    # sous 0,1 m/s (pente > ~+75 % ou < ~-85 %) : le randonneur « téléportait »
+    # et toute l'horloge aval se décalait. Le lissage de pente ci-dessus rend
+    # le cas rare (il faut une vraie pente extrême à l'échelle du MNT).
+    seg_durs_s = np.where(seg_dists_m > 0.0,
+                          seg_dists_m / np.maximum(speeds_ms, 0.1), 0.0)
     if totalpoints > 0:
         seg_durs_s[-1] = 0.0  # dernier point : pas de segment sortant
 
@@ -3655,10 +3777,12 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
         "totaldist": 0.0, "totaldur": 0.0,
         "distsun": 0.0, "distrelief": 0.0, "distveg": 0.0, "distrelief_veg": 0.0,
         "dursun": 0.0, "durrelief": 0.0, "durveg": 0.0, "durrelief_veg": 0.0,
+        "distnight": 0.0, "durnight": 0.0,
     }
     processeddata = []
 
-    categorymap = {"RELIEF": "relief", "VEGETATION": "veg", "SUN": "sun", "RELIEF_VEG": "relief_veg"}
+    categorymap = {"RELIEF": "relief", "VEGETATION": "veg", "SUN": "sun",
+                   "RELIEF_VEG": "relief_veg", "NIGHT": "night"}
 
     for i in range(totalpoints):
         p1 = simpoints[i]
@@ -3670,14 +3794,16 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
         dist = float(seg_dists_m[i])
         duration = float(seg_durs_s[i])
 
-        if finalstatus != "NIGHT":
-            cat = categorymap.get(finalstatus)
-            if cat:
-                stats[f"dist{cat}"] += dist
-                stats[f"dur{cat}"] += duration
+        # Les totaux couvrent TOUT le parcours ; la nuit est une catégorie à
+        # part (distnight/durnight). L'ancien code excluait la nuit des
+        # totaux : une rando entièrement nocturne sortait à 0 km / 0 s.
+        cat = categorymap.get(finalstatus)
+        if cat:
+            stats[f"dist{cat}"] += dist
+            stats[f"dur{cat}"] += duration
 
-            stats["totaldist"] += dist
-            stats["totaldur"] += duration
+        stats["totaldist"] += dist
+        stats["totaldur"] += duration
 
         processeddata.append({
             "point": p1, 
@@ -3949,6 +4075,16 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
         except OSError:
             pass
         raise CalculationCancelled("stop requested")
+
+    # Rapport de couverture : les échantillons sans donnée ont reçu 0 m
+    # (relief aplati → ombres sous-détectées). Rendre la dégradation VISIBLE ;
+    # c'est le pendant côté carte du contrôle strict fait sur la trace dans
+    # simulatehike.
+    cov_miss, cov_tot = hgt_manager.coverage_report()
+    if cov_tot > 0 and cov_miss > 0:
+        log_func(f"⚠ Couverture altimétrique incomplète : {cov_miss}/{cov_tot} "
+                 f"échantillons ({100.0 * cov_miss / cov_tot:.1f} %) sans donnée, "
+                 f"altitude 0 m utilisée → ombres sous-détectées dans ces zones.")
     
 
 
@@ -4233,7 +4369,12 @@ def extend_to_sun(lat, lon, alt, sun_az, sun_alt):
     m_lat, m_lon = get_meters_per_degree_wgs84(lat)
 
     alt_rad = np.deg2rad(max(sun_alt, 0.5))
-    az_rad  = np.deg2rad(sun_az + 180.0)  # ← INVERSION CRUCIALE
+    # Cap = azimut solaire TEL QUEL, même convention que le moteur de
+    # ray-tracing (pysolar get_position : azimut Nord=0, horaire ; vérifié
+    # empiriquement : ~180° au midi solaire). L'ancien `sun_az + 180.0`
+    # (commenté « INVERSION CRUCIALE ») faisait monter le rayon dans la
+    # direction ANTI-solaire : plein nord à midi.
+    az_rad  = np.deg2rad(sun_az)
 
     dist = min(20000, max(4000, 2000 / np.tan(alt_rad)))
 
@@ -4243,10 +4384,14 @@ def extend_to_sun(lat, lon, alt, sun_az, sun_alt):
     lat2 = lat + dlat
     lon2 = lon + dlon
 
+    # + d²/(2R) : même terme de courbure que le moteur (la surface terrestre
+    # « tombe » le long du trajet, le rayon rectiligne gagne de l'altitude
+    # apparente au-dessus du géoïde). Le signe négatif accompagnait
+    # l'ancienne direction inversée.
     alt2 = (
         alt
         + dist * np.tan(alt_rad)
-        - dist**2 / (2 * EARTH_RADIUS)
+        + dist**2 / (2 * EARTH_RADIUS)
     )
 
     return lon2, lat2, alt2
@@ -4930,11 +5075,17 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 "% Ensoleillé": round(stats['dursun']/tot_dur*100, 1) if tot_dur else 0,
                 "% Ombre Relief": round(stats['durrelief']/tot_dur*100, 1) if tot_dur else 0,
                 "% Ombre Végét.": round(stats['durveg']/tot_dur*100, 1) if tot_dur else 0,
+                # RELIEF_VEG était accumulé mais jamais exporté (les % ne
+                # sommaient pas à 100) ; la nuit compte désormais dans les
+                # totaux, sa part doit donc être visible elle aussi.
+                "% Ombre R+V": round(stats['durrelief_veg']/tot_dur*100, 1) if tot_dur else 0,
+                "% Nuit": round(stats['durnight']/tot_dur*100, 1) if tot_dur else 0,
             }
             if not compute_shadows:
                 # Mode pente : pas de ray-tracing, un « 100 % ensoleillé »
                 # serait trompeur → colonnes d'ombre laissées vides.
                 row["% Ensoleillé"] = row["% Ombre Relief"] = row["% Ombre Végét."] = ""
+                row["% Ombre R+V"] = row["% Nuit"] = ""
             results.append(row)
 
         if results:
