@@ -63,6 +63,7 @@ REPO_URL = f"https://github.com/{REPO_DEFAULT}"
 MAP = {
     # Source
     "gpxsolar.py":                  "gpxsolar.py",
+    "test_gpxsolar.py":             "test_gpxsolar.py",
     "_loader.py":                   "_loader.py",
     "update_app.py":                "update_app.py",
     "deploy.py":                    "deploy.py",

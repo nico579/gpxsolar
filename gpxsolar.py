@@ -1124,6 +1124,10 @@ def equirect_m_vec(lat1, lon1, lat2, lon2, radius=EARTH_RADIUS):
     lat2r = np.deg2rad(lat2)
     dlat = lat2r - lat1r
     dlon = np.deg2rad(lon2 - lon1)
+    # Normalise dlon dans [-π, π] : sans ça, un segment traversant
+    # l'antiméridien (179,9° → -179,9°) mesurait presque un tour de Terre
+    # au lieu de ~22 km.
+    dlon = (dlon + np.pi) % (2.0 * np.pi) - np.pi
     x = dlon * np.cos((lat1r + lat2r) * 0.5)
     y = dlat
     return radius * np.sqrt(x * x + y * y)
@@ -1682,6 +1686,11 @@ class VegetationManager:
              return self._load_single_tile(os.path.basename(url))
 
         logging.info(f"Downloading vegetation {tile_name} (~1GB)...")
+        # Temp UNIQUE (pid+thread) : plusieurs workers de blocs peuvent
+        # constater l'absence de la même tuile en même temps ; avec un .part
+        # partagé, l'un pouvait renommer/supprimer le fichier pendant que
+        # l'autre écrivait encore (même pattern que LidarManager).
+        tmp_path = f"{output_path}.{os.getpid()}.{threading.get_ident()}.part"
         try:
             # timeout=(connect, read) : en stream, `read` borne l'attente
             # ENTRE deux chunks, pas la durée totale — un gros fichier lent
@@ -1689,13 +1698,12 @@ class VegetationManager:
             response = requests.get(url, stream=True, timeout=(10, 60))
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
-            block_size = 8192
+            block_size = 1024 * 1024  # 1 Mo (8 Kio = ~100k itérations Python/Go)
             downloaded_size = 0
 
             # Écriture atomique : .part puis os.replace. Un kill du sous-processus
             # (bouton Arrêter) en plein download ne laisse jamais un .tif tronqué
             # que le prochain run prendrait pour un cache valide.
-            tmp_path = output_path + ".part"
             with open(tmp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     check_cancelled()
@@ -1704,17 +1712,22 @@ class VegetationManager:
                     if self.progress_callback and total_size > 0:
                         progress = (downloaded_size / total_size) * 100
                         self.progress_callback(50 + progress * 0.05, f"DL WorldCover {tile_name}: {progress:.1f}%")
+            # Valider AVANT publication : un corps HTML d'erreur ou un fichier
+            # tronqué ne doit jamais devenir un cache « valide » permanent.
+            with rasterio.open(tmp_path) as _ds:
+                if _ds.width <= 0 or _ds.height <= 0:
+                    raise IOError("GeoTIFF WorldCover vide")
             os.replace(tmp_path, output_path)
 
             return self._load_single_tile(os.path.basename(output_path))
         except CalculationCancelled:
             # Arrêt utilisateur : purger le fichier partiel et PROPAGER
             # (le except Exception ci-dessous avalerait l'annulation).
-            if os.path.exists(output_path + ".part"): os.remove(output_path + ".part")
+            if os.path.exists(tmp_path): os.remove(tmp_path)
             raise
         except Exception as e:
             logging.error(f"Vegetation DL error: {e}")
-            if os.path.exists(output_path + ".part"): os.remove(output_path + ".part")
+            if os.path.exists(tmp_path): os.remove(tmp_path)
             return False
             
     def _load_tiles(self):
@@ -1742,6 +1755,15 @@ class VegetationManager:
             return True
         except Exception as e:
             logging.error(f"Error loading vegetation tile {filename}: {e}")
+            # Quarantaine (.bad, ne matche plus le scan *.tif) : sinon le
+            # fichier corrompu bloque tout re-téléchargement et l'échec se
+            # répète à chaque run.
+            try:
+                p = os.path.join(self.worldcover_dir, filename)
+                os.replace(p, p + ".bad")
+                logging.warning(f"Tuile végétation corrompue mise en quarantaine : {filename}.bad")
+            except OSError:
+                pass
             return False
 
     def get_vegetation_heights_vec(self, lats, lons):
@@ -2157,6 +2179,17 @@ class LidarManager:
                 _tmp = f"{cache_path}.{os.getpid()}.{threading.get_ident()}.part"
                 with open(_tmp, 'wb') as f:
                     f.write(response.content)
+                # Valider AVANT publication : les magic bytes ne garantissent
+                # pas un raster lisible (corps tronqué, dimensions nulles).
+                try:
+                    with rasterio.open(_tmp) as _ds:
+                        _ok = _ds.width > 0 and _ds.height > 0
+                except Exception:
+                    _ok = False
+                if not _ok:
+                    os.remove(_tmp)
+                    raise requests.exceptions.RequestException(
+                        "tuile WMS illisible après téléchargement")
                 os.replace(_tmp, cache_path)
                 self.log(f"  ✓ Tuile {tx},{ty} téléchargée")
                 return True
@@ -2267,6 +2300,13 @@ class LidarManager:
                     return True
             except Exception as e:
                 self.log(f"  ❌ Erreur lecture {cache_path}: {e}")
+                # Quarantaine : sans elle, le cache corrompu reste sur disque,
+                # empêche le re-téléchargement et fait échouer chaque run.
+                try:
+                    os.replace(cache_path, cache_path + ".bad")
+                    self.log(f"  ♻ Tuile corrompue mise en quarantaine : {os.path.basename(cache_path)}.bad")
+                except OSError:
+                    pass
                 return False
     
     # NOTE : wrapper scalaire get_value supprimé (jamais appelé).
@@ -2703,6 +2743,13 @@ class HGTDataManager:
         et objets (végétation WorldCover) viennent de données distinctes, pas
         de partage possible → on retombe sur les deux appels séparés."""
         if self.lidar_manager:
+            if self.shadowmode == 'relief':
+                # Mode relief : la végétation est ignorée par le moteur ;
+                # ne pas demander le MNH évite son lazy-download + chargement
+                # RAM (le moteur remettait les hauteurs d'objets à zéro APRÈS
+                # les avoir chargées).
+                mnt = self.lidar_manager.get_values_vec('mnt', lats, lons)
+                return mnt, np.zeros_like(mnt)
             r = self.lidar_manager.get_values_vec_multi(['mnt', 'mnh'], lats, lons)
             return r['mnt'], r['mnh']
         return (self.get_ground_elevations_vec(lats, lons),
@@ -2967,6 +3014,14 @@ class HGTDataManager:
                 return True
             except Exception as e:
                 self.log(f"Erreur chargement tuile Copernicus {filepath} en RAM: {e}")
+                # Quarantaine + oubli des métadonnées : le prochain accès
+                # re-télécharge au lieu d'échouer en boucle sur le même cache.
+                try:
+                    os.replace(filepath, filepath + ".bad")
+                    self.hgt_tile_metadata.pop(tile_key_tuple, None)
+                    self.log(f"  ♻ Tuile corrompue mise en quarantaine : {os.path.basename(filepath)}.bad")
+                except OSError:
+                    pass
                 return False
                 
     # NOTE : ancienne version cassée de _ensure_copernicus_tile_metadata_loaded
@@ -3339,17 +3394,19 @@ class HGTDataManager:
         base_url = "https://copernicus-dem-30m.s3.amazonaws.com"
         url = f"{base_url}/{tile_name}/{filename}"
 
+        # Temp UNIQUE (pid+thread) : plusieurs workers de blocs peuvent tenter
+        # la même tuile en parallèle (cf. WorldCover/LidarManager).
+        tmp_path = f"{output_path}.{os.getpid()}.{threading.get_ident()}.part"
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             response = requests.get(url, timeout=30, headers=headers, stream=True)
             response.raise_for_status()
             total_size = int(response.headers.get('content-length', 0))
-            block_size = 8192 # 8KB
+            block_size = 1024 * 1024  # 1 Mo (8 Kio = trop d'itérations Python)
             downloaded_size = 0
 
             # Écriture atomique : .part puis os.replace (kill-safe). Une tuile
             # présente est toujours complète, jamais tronquée par un Arrêter.
-            tmp_path = output_path + ".part"
             with open(tmp_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=block_size):
                     f.write(chunk)
@@ -3357,6 +3414,11 @@ class HGTDataManager:
                     if self.progress_callback and total_size > 0:
                         progress = (55 + (downloaded_size / total_size) * 0.05) # De 55% à 60%
                         self.progress_callback(progress, f"DL Copernicus {filename}: {progress:.1f}%")
+            # Valider AVANT publication (page d'erreur S3 ou tronquage : jamais
+            # en cache sous un nom « valide »).
+            with rasterio.open(tmp_path) as _ds:
+                if _ds.width <= 0 or _ds.height <= 0:
+                    raise IOError("GeoTIFF Copernicus vide")
             os.replace(tmp_path, output_path)
 
             # Ajouter la tuile à downloaded_tiles_info ici, mais sans charger en RAM
@@ -3367,8 +3429,8 @@ class HGTDataManager:
 
         except Exception as e:
             logging.error(f"Copernicus download error: {e}")
-            if os.path.exists(output_path + ".part"):
-                os.remove(output_path + ".part")
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
             return False
 
     def _ensure_copernicus_tile_metadata_loaded(self, lat, lon):
@@ -3471,7 +3533,8 @@ def _nearest_seg_with_param(xs, ys, x1, y1, x2, y2):
         best_t[k:k+chunk]   = t[np.arange(idx.size), idx]
     return best_idx, best_t
 
-def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_ROUND_SEC):
+def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_ROUND_SEC,
+                              need_hits=True, as_codes=False):
     """
     Calcule le type d'obstacle pour un LOT de points via Ray Tracing vectorisé.
 
@@ -3479,10 +3542,18 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
         lats, lons : arrays float64 des coordonnées WGS84.
         ts         : array float64 des timestamps UTC (secondes depuis l'epoch).
         hgt_manager, solar_step_s : cf. HGTDataManager.
+        need_hits  : False = ne calcule pas les empreintes d'ombre (la carte
+            d'ombre les jetait ; leur calcul matérialisait un masque complet
+            + une liste Python de tuples par bloc). Le 2e retour vaut None.
+        as_codes   : True = retourne les statuts en np.uint8 (codes
+            STATUS_MAP) au lieu d'une liste de strings. La carte d'ombre
+            reconvertissait les strings en uint8 pixel par pixel.
 
-    Retourne deux listes alignées:
-      - listes de statuts ('RELIEF', 'VEGETATION', 'SUN', 'NIGHT', 'RELIEF_VEG')
-      - liste de shadow_hit (lat, lon) ou None lorsque pas d'empreinte trouvée
+    Retourne deux éléments alignés:
+      - statuts : liste de strings ('RELIEF', 'VEGETATION', 'SUN', 'NIGHT',
+        'RELIEF_VEG'), ou np.ndarray uint8 si as_codes=True
+      - shadow_hits : liste de (lat, lon) ou None par point, ou None global
+        si need_hits=False
 
     Prend des arrays (pas des objets GPXTrackPoint) : l'appelant carte d'ombre
     génère des dizaines de milliers de pixels par bloc — créer autant d'objets
@@ -3492,7 +3563,9 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
     lons = np.asarray(lons, dtype=np.float64)
     n_pts = lats.size
     if n_pts == 0:
-        return [], []
+        if as_codes:
+            return np.zeros(0, dtype=np.uint8), ([] if need_hits else None)
+        return [], ([] if need_hits else None)
 
     # Positions solaires (avec cache) — ts = timestamps UTC déjà en main
     sun_alts, sun_azs_full = solar_altaz_cached_vec(lats, lons, ts, step_s=solar_step_s)
@@ -3504,14 +3577,16 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
     statuses[night_mask] = 4 # NIGHT
 
     # Préparer les arrays pour les shadow hits (NaN par défaut)
-    hit_lats_full = np.full(n_pts, np.nan, dtype=np.float64)
-    hit_lons_full = np.full(n_pts, np.nan, dtype=np.float64)
+    if need_hits:
+        hit_lats_full = np.full(n_pts, np.nan, dtype=np.float64)
+        hit_lons_full = np.full(n_pts, np.nan, dtype=np.float64)
 
     # Masque pour ne traiter que les points où le soleil est levé
     valid_mask = ~night_mask
     if not np.any(valid_mask):
-        shadow_hits = [(lat, lon) if not np.isnan(lat) else None 
-                       for lat, lon in zip(hit_lats_full, hit_lons_full)]
+        shadow_hits = [None] * n_pts if need_hits else None
+        if as_codes:
+            return statuses, shadow_hits
         return [STATUS_MAP_INV[s] for s in statuses], shadow_hits
 
     # 3. Préparer les données pour les points valides uniquement
@@ -3595,23 +3670,26 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
         temp_statuses[sl] = chunk_statuses
 
         # 9. Empreintes d'ombre : premier point bloquant de chaque rayon
-        all_rays_blocking_mask = obstacle_profile > (ray_altitudes + TOLERANCE)
-        any_block_per_ray = np.any(all_rays_blocking_mask, axis=1)
+        if need_hits:
+            all_rays_blocking_mask = obstacle_profile > (ray_altitudes + TOLERANCE)
+            any_block_per_ray = np.any(all_rays_blocking_mask, axis=1)
 
-        if np.any(any_block_per_ray):
-            blocked_ray_indices = np.where(any_block_per_ray)[0]
-            first_block_indices = np.argmax(all_rays_blocking_mask[blocked_ray_indices], axis=1)
-            # Indices originaux dans le batch complet
-            original_indices = valid_idx[sl][blocked_ray_indices]
-            hit_lats_full[original_indices] = ray_lats[blocked_ray_indices, first_block_indices]
-            hit_lons_full[original_indices] = ray_lons[blocked_ray_indices, first_block_indices]
+            if np.any(any_block_per_ray):
+                blocked_ray_indices = np.where(any_block_per_ray)[0]
+                first_block_indices = np.argmax(all_rays_blocking_mask[blocked_ray_indices], axis=1)
+                # Indices originaux dans le batch complet
+                original_indices = valid_idx[sl][blocked_ray_indices]
+                hit_lats_full[original_indices] = ray_lats[blocked_ray_indices, first_block_indices]
+                hit_lons_full[original_indices] = ray_lons[blocked_ray_indices, first_block_indices]
 
     np.put(statuses, valid_idx, temp_statuses)
 
-    # Create the final list of tuples from the arrays
-    shadow_hits = [(lat, lon) if not np.isnan(lat) else None 
-                   for lat, lon in zip(hit_lats_full, hit_lons_full)]
-    
+    if need_hits:
+        shadow_hits = [(lat, lon) if not np.isnan(lat) else None
+                       for lat, lon in zip(hit_lats_full, hit_lons_full)]
+    else:
+        shadow_hits = None
+
     # ====================================================================
     # CONVERSION FINALE des statuts numériques en strings
     # ====================================================================
@@ -3623,8 +3701,11 @@ def get_sun_blocking_type_vec(lats, lons, ts, hgt_manager, solar_step_s=SOLAR_RO
         final_statuses_numeric[final_statuses_numeric == 1] = 0 # RELIEF (1) -> SUN (0)
         final_statuses_numeric[final_statuses_numeric == 3] = 2 # RELIEF_VEG (3) -> VEGETATION (2)
 
+    if as_codes:
+        return final_statuses_numeric, shadow_hits
+
     final_statuses_str = [STATUS_MAP_INV[s] for s in final_statuses_numeric]
-    
+
     return final_statuses_str, shadow_hits
 
 def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
@@ -3953,9 +4034,6 @@ def build_time_function_segmented(trace_points_with_time, transformer_l93):
 
 
 
-_STATUS_STR_TO_CODE = {'SUN': 0, 'RELIEF': 1, 'VEGETATION': 2, 'RELIEF_VEG': 3, 'NIGHT': 4}
-
-
 def process_block(args):
     i, j, block_width, block_height, xmin_a, ymax_a, res, t_of_xy_vec, shadow_mode, hgt_manager = args
 
@@ -3977,15 +4055,13 @@ def process_block(args):
     transformer_wgs84 = TransformerPool.lambert_to_wgs84()
     lons, lats = transformer_wgs84.transform(x_flat, y_flat)
 
-    statuses, _ = get_sun_blocking_type_vec(
-        lats, lons, ts_arr, hgt_manager, solar_step_s=hgt_manager.solar_step_s)
-
-    # Conversion statuts → uint8 vectorisée via dict.get sur la liste (rapide)
-    numeric_statuses = np.fromiter(
-        (_STATUS_STR_TO_CODE.get(s, 255) for s in statuses),
-        dtype=np.uint8, count=len(statuses)
-    )
-    result_block = numeric_statuses.reshape((block_height, block_width))
+    # as_codes + need_hits=False : codes uint8 directs, pas d'empreintes.
+    # L'ancien chemin produisait par bloc une liste de strings + une liste de
+    # tuples d'impacts, jetées puis reconverties en uint8 pixel par pixel.
+    codes, _ = get_sun_blocking_type_vec(
+        lats, lons, ts_arr, hgt_manager, solar_step_s=hgt_manager.solar_step_s,
+        need_hits=False, as_codes=True)
+    result_block = codes.reshape((block_height, block_width))
 
     return (i, j, result_block)
 
@@ -4030,7 +4106,11 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     hgt_manager.shadowmode = shadow_mode
 
     cancelled = False
-    with rasterio.open(out_tif, 'w', **profile) as dst:
+    # Livrable atomique : écrit dans un .part, publié par os.replace en fin de
+    # calcul. Un Arrêter (kill du sous-processus) pendant l'écriture ne laisse
+    # jamais un .tif final tronqué (même pattern que les téléchargements).
+    out_tmp = out_tif + ".part"
+    with rasterio.open(out_tmp, 'w', **profile) as dst:
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
 
             block_tasks = []
@@ -4071,10 +4151,12 @@ def compute_shadow_geotiff(processed_data, hgt_manager, shadow_mode,
     if cancelled:
         # Carte partielle inutilisable : la purger avant de remonter.
         try:
-            os.remove(out_tif)
+            os.remove(out_tmp)
         except OSError:
             pass
         raise CalculationCancelled("stop requested")
+
+    os.replace(out_tmp, out_tif)
 
     # Rapport de couverture : les échantillons sans donnée ont reçu 0 m
     # (relief aplati → ombres sous-détectées). Rendre la dégradation VISIBLE ;
@@ -4138,9 +4220,11 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
             data = src.read(1)
             rgba = SHADOW_LUT[data]
 
-            # Créer l'image avec Pillow et la sauvegarder
+            # Créer l'image avec Pillow et la sauvegarder (atomique :
+            # format explicite car PIL ne peut pas l'inférer de « .part »)
             img = Image.fromarray(rgba)
-            img.save(png_path)
+            img.save(png_path + ".part", format="PNG")
+            os.replace(png_path + ".part", png_path)
             log_func(f"DEBUG: GeoTIFF -> PNG conversion done: {png_path}")
 
     except Exception as e:
@@ -4176,12 +4260,20 @@ def geotiff_to_kml_groundoverlay(tif_path, kmz_output_path, log_func, existing_k
             nw = transformer_wgs84.transform(bl.left,  bl.top)
             go.gxlatlonquad.coords = [sw, se, ne, nw]
 
-        kml.savekmz(kmz_output_path) # kmz_output_path est maintenant le chemin du KMZ
+        # Atomique : .part puis os.replace (un Arrêter pendant l'écriture ne
+        # laisse pas de KMZ final tronqué).
+        kml.savekmz(kmz_output_path + ".part")
+        os.replace(kmz_output_path + ".part", kmz_output_path)
         log_func(f"DEBUG: KMZ GroundOverlay created: {kmz_output_path}")
         return kmz_output_path
     except Exception as e:
         log_func(f"ERROR: Cannot create the KMZ GroundOverlay: {e}")
         traceback.print_exc()
+        try:
+            if os.path.exists(kmz_output_path + ".part"):
+                os.remove(kmz_output_path + ".part")
+        except OSError:
+            pass
         return None
 
 
@@ -4267,9 +4359,12 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
             if zoom_min is None:
                 zoom_min = max(8, zoom_max - 4)
 
-            if os.path.exists(mbtiles_path):
-                os.remove(mbtiles_path)
-            con = sqlite3.connect(mbtiles_path)
+            # Livrable atomique : SQLite construit dans un .part, publié par
+            # os.replace à la fin (un Arrêter ne laisse pas de MBTiles tronqué).
+            mb_tmp = mbtiles_path + ".part"
+            if os.path.exists(mb_tmp):
+                os.remove(mb_tmp)
+            con = sqlite3.connect(mb_tmp)
             cur = con.cursor()
             cur.executescript("""
                 CREATE TABLE metadata (name TEXT, value TEXT);
@@ -4339,12 +4434,18 @@ def geotiff_to_mbtiles_overlay(tif_path, mbtiles_path, log_func,
                 cur.executemany("INSERT OR REPLACE INTO tiles VALUES (?,?,?,?)", batch)
                 con.commit()
             con.close()
+            os.replace(mb_tmp, mbtiles_path)
         log_func(f"DEBUG: MBTiles overlay created: {mbtiles_path} "
                  f"(z{zoom_min}-{zoom_max}, {total} tuiles)")
         return mbtiles_path
     except Exception as e:
         log_func(f"ERROR: Cannot create the MBTiles: {e}")
         traceback.print_exc()
+        try:
+            if os.path.exists(mbtiles_path + ".part"):
+                os.remove(mbtiles_path + ".part")
+        except OSError:
+            pass
         return None
 
 
@@ -4876,7 +4977,11 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         veg_manager = None
         # Le LiDAR HD inclut déjà la végétation (MNH), donc on n'active le
         # gestionnaire de végétation WorldCover que pour les autres sources.
-        if want_shadow_data and dem_source != 'ign_lidar_hd' and not args.no_vegetation_shadow:
+        # En mode ombre 'relief', la végétation est ignorée à la source du
+        # ray-tracing : construire le manager pouvait déclencher un scan et
+        # surtout un téléchargement WorldCover (~1 Go/tuile) pour rien.
+        if (want_shadow_data and dem_source != 'ign_lidar_hd'
+                and shadow_mode != 'relief' and not args.no_vegetation_shadow):
 
             veg_manager = VegetationManager(args.vegetation_dir, not args.no_download_vegetation, progress_callback=progress_callback)
 
@@ -5021,7 +5126,9 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                     trace_kml_path = os.path.join(
                         SHADOW_GPX_DIR, f"{shadow_map_name_base}_trace.kml")
                     try:
-                        trace_kml_obj.save(trace_kml_path)
+                        # Atomique (.part + replace), cf. GeoTIFF/KMZ.
+                        trace_kml_obj.save(trace_kml_path + ".part")
+                        os.replace(trace_kml_path + ".part", trace_kml_path)
                         log_func(f"DEBUG: Trace KML autonome (track Locus/OsmAnd): {trace_kml_path}")
                     except Exception as e_tr:
                         log_func(f"WARNING: track KML export skipped: {e_tr}")
@@ -5063,7 +5170,9 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
                 out_path = os.path.join(SHADOW_GPX_DIR, out_name)
                 
                 if trace_kml_obj:
-                    trace_kml_obj.save(out_path)
+                    # Atomique (.part + replace), cf. GeoTIFF/KMZ.
+                    trace_kml_obj.save(out_path + ".part")
+                    os.replace(out_path + ".part", out_path)
                     log_func(f"   ✓ Track KML file created: {out_name}")
                 
                 if first_output_path is None: first_output_path = out_path
@@ -5091,6 +5200,10 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         if results:
             import pandas as pd  # import différé (charge ~0.75 s)
             df = pd.DataFrame(results)
+            # Append assumé NON atomique : journal cumulatif de quelques
+            # centaines d'octets par run ; au pire un kill en plein append
+            # tronque la DERNIÈRE ligne sans toucher l'historique. Les vrais
+            # livrables (GeoTIFF/KMZ/MBTiles/KML) sont publiés .part+replace.
             output_is_empty = not os.path.exists(output_default) or os.stat(output_default).st_size == 0
             df.to_csv(output_default, mode='a', header=output_is_empty, index=False, encoding='utf-8')
             
@@ -5687,6 +5800,31 @@ def run_headless(args, tz_finder):
 
 
 def main():
+    # Types argparse « bornés » : le pattern standard pour valider des valeurs
+    # numériques à l'entrée (une fonction type= qui lève ArgumentTypeError).
+    # Sans eux : --solar-step-s 0 = division par zéro, --batch-size 0 =
+    # range(..., 0) vide, --num-workers 0 = ThreadPoolExecutor invalide,
+    # résolution négative = grille absurde. Erreur claire à l'usage plutôt
+    # qu'un traceback au fond du moteur. La GUI passe par ce même parser
+    # (sous-processus enfant), donc elle est couverte aussi.
+    def positive_int(val):
+        iv = int(val)
+        if iv <= 0:
+            raise argparse.ArgumentTypeError(f"entier > 0 attendu (reçu {val})")
+        return iv
+
+    def nonneg_int(val):
+        iv = int(val)
+        if iv < 0:
+            raise argparse.ArgumentTypeError(f"entier >= 0 attendu (reçu {val})")
+        return iv
+
+    def positive_float(val):
+        fv = float(val)
+        if not math.isfinite(fv) or fv <= 0:
+            raise argparse.ArgumentTypeError(f"nombre > 0 attendu (reçu {val})")
+        return fv
+
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--version', action='version', version='gpxsolar 1.3.3 (2026-07)')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
@@ -5695,12 +5833,12 @@ def main():
     # 'cubic' retiré des choices : accepté mais jamais implémenté (retombait
     # silencieusement sur nearest).
     parser.add_argument('--interpolation', default='bilinear', choices=['nearest', 'bilinear'], help='Interpolation method')
-    parser.add_argument('--analysis-resolution', type=float, default=5.0, help='Analysis resolution for shadow computation (in metres)')
+    parser.add_argument('--analysis-resolution', type=positive_float, default=5.0, help='Analysis resolution for shadow computation (in metres)')
     parser.add_argument('--vegetation-dir', default='WorldCover', help='WorldCover directory')
-    parser.add_argument('--passage-interval-min', type=int, default=0, help='Interval in minutes to create waypoints in the KML (0=none)')
+    parser.add_argument('--passage-interval-min', type=nonneg_int, default=0, help='Interval in minutes to create waypoints in the KML (0=none)')
     parser.add_argument('--no-download-vegetation', action='store_true', help='Disable automatic vegetation download')
     parser.add_argument('--no-vegetation-shadow', action='store_true', help='Fully disable vegetation shadow detection')
-    parser.add_argument('--max-shadow-distance', type=float, default=1000.0,
+    parser.add_argument('--max-shadow-distance', type=positive_float, default=1000.0,
                        help='Maximum shadow detection distance (in metres, default: 1000)')
     parser.add_argument('--profile', action='store_true', help='Enable performance profiling.')
     parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Temporary directory for profiling reports.')
@@ -5733,15 +5871,15 @@ def main():
                          help='Draw the simulated sun rays in the KML.')
     grp_cli.add_argument('--show-slope-arrows', action='store_true',
                          help='Draw travel-direction arrows on the slope-coloured KML.')
-    grp_cli.add_argument('--sun-ray-interval', type=int, default=20,
+    grp_cli.add_argument('--sun-ray-interval', type=positive_int, default=20,
                          help='Interval between sun rays (default: 20).')
-    grp_cli.add_argument('--batch-size', type=int, default=256,
+    grp_cli.add_argument('--batch-size', type=positive_int, default=256,
                          help='Computation batch size (default: 256).')
-    grp_cli.add_argument('--solar-step-s', type=int, default=60,
+    grp_cli.add_argument('--solar-step-s', type=positive_int, default=60,
                          help='Sun time step in seconds (default: 60).')
-    grp_cli.add_argument('--num-workers', type=int, default=DEFAULT_NUM_WORKERS,
+    grp_cli.add_argument('--num-workers', type=positive_int, default=DEFAULT_NUM_WORKERS,
                          help=f'Parallel workers for the shadow map (default: {DEFAULT_NUM_WORKERS} = number of cores).')
-    grp_cli.add_argument('--margin-meters', type=int, default=500,
+    grp_cli.add_argument('--margin-meters', type=nonneg_int, default=500,
                          help='Margin around the track in metres (default: 500).')
     grp_cli.add_argument('--open', action='store_true',
                          help='Open the result when done (Windows only).')
