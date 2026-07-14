@@ -297,3 +297,52 @@ shebang `#!/usr/bin/env python3`, faire `chmod +x deploy.py` la 1ère fois).
   vérifier que `python3` est arm64 :
   `python3 -c "import platform; print(platform.machine())"` doit dire `arm64`
   (sinon installer Python depuis python.org ou via Homebrew ARM).
+
+## 7. Tests
+
+### Tests unitaires (CI + local)
+
+`test_gpxsolar.py` à la racine : tests de caractérisation des fonctions
+numériques (interpolation bilinéaire en convention centres, distance
+equirectangulaire et antiméridien, clé du cache solaire, moteur de
+ray-tracing comparé à une référence point à point sur les 3 modes d'ombre,
+géométrie des rayons KML). Particularité : le module n'est PAS importé (son
+bootstrap s'exécute à l'import) ; le source des fonctions est extrait via
+`ast` et exécuté avec des stubs. Seul numpy est requis.
+
+```bash
+python test_gpxsolar.py     # runner intégré, code de sortie != 0 si échec
+pytest test_gpxsolar.py     # équivalent via pytest
+```
+
+La CI (`.github/workflows/ci.yml`) les exécute sur les 3 OS à chaque push
+touchant `gpxsolar.py`, `test_gpxsolar.py`, `_loader.py` ou `deploy.py`.
+
+### Run témoin (validation manuelle de bout en bout)
+
+Pour vérifier qu'un changement ne modifie pas les résultats (ou documenter
+qu'il les modifie volontairement), rejouer la trace témoin. Elle est locale
+et non versionnée (trace GPS personnelle) : `2026-05-16_13-31.gpx` dans le
+dossier de travail.
+
+```bash
+python gpxsolar.py --bootstrap=none --gpx 2026-05-16_13-31.gpx \
+    --date 16/05/2026 --time 13:31 --dem-source srtm1 --direction CW \
+    --generate-shadow-map --output temoin.csv
+```
+
+Valeurs de référence (code de juillet 2026) :
+
+| Dist. totale | Durée | % Soleil | % Relief | % Végét. | % R+V | % Nuit |
+|--------------|---------|------|-----|------|------|-----|
+| 2,71 km | 0:50:04 | 12,5 | 0,0 | 69,6 | 17,9 | 0,0 |
+
+Notes :
+
+- comparer des cartes d'ombre (GeoTIFF) UNIQUEMENT à `--num-workers` égal :
+  l'ordre de remplissage du cache solaire par les workers peut déplacer
+  ~1 pixel d'un run à l'autre ;
+- le CSV de la trace, lui, est déterministe (calcul séquentiel) : toute
+  différence y est réelle ;
+- si un changement modifie légitimement le témoin (correction du modèle,
+  nouveau lissage...), mettre à jour ce tableau dans le même commit.

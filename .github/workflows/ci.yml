@@ -4,13 +4,17 @@ on:
   push:
     paths:
       - 'gpxsolar.py'
+      - 'test_gpxsolar.py'
       - '_loader.py'
       - 'deploy.py'
+      - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'gpxsolar.py'
+      - 'test_gpxsolar.py'
       - '_loader.py'
       - 'deploy.py'
+      - '.github/workflows/ci.yml'
   workflow_dispatch:
 
 jobs:
@@ -70,3 +74,10 @@ jobs:
 
       - name: Aide CLI (smoke test argparse)
         run: python gpxsolar.py --help
+
+      - name: Tests de caractérisation (test_gpxsolar.py)
+        # Extraction ast des fonctions pures, pas d'import du module : ne
+        # dépend que de numpy (déjà installé ci-dessus). Couvre bilinéaire,
+        # antiméridien, clé du cache solaire, moteur de ray-tracing (chunké
+        # vs référence point à point) et géométrie des rayons KML.
+        run: python test_gpxsolar.py
