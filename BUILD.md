@@ -321,9 +321,8 @@ touchant `gpxsolar.py`, `test_gpxsolar.py`, `_loader.py` ou `deploy.py`.
 ### Run témoin (validation manuelle de bout en bout)
 
 Pour vérifier qu'un changement ne modifie pas les résultats (ou documenter
-qu'il les modifie volontairement), rejouer la trace témoin. Elle est locale
-et non versionnée (trace GPS personnelle) : `2026-05-16_13-31.gpx` dans le
-dossier de travail.
+qu'il les modifie volontairement), rejouer la trace témoin
+`2026-05-16_13-31.gpx`, versionnée à la racine du repo.
 
 ```bash
 python gpxsolar.py --bootstrap=none --gpx 2026-05-16_13-31.gpx \

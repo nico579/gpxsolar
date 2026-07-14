@@ -64,6 +64,8 @@ MAP = {
     # Source
     "gpxsolar.py":                  "gpxsolar.py",
     "test_gpxsolar.py":             "test_gpxsolar.py",
+    # Trace témoin du run de validation manuel (BUILD.md §7)
+    "2026-05-16_13-31.gpx":         "2026-05-16_13-31.gpx",
     "_loader.py":                   "_loader.py",
     "update_app.py":                "update_app.py",
     "deploy.py":                    "deploy.py",
