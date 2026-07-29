@@ -91,6 +91,9 @@ MAP = {
     "release_github.yml":           ".github/workflows/release.yml",
     "update_github.yml":            ".github/workflows/update.yml",
     "cross_platform_github.yml":    ".github/workflows/cross_platform.yml",
+    # Config ruff : le job lint du CI en dépend (sans elle, ruff appliquerait
+    # ses règles par défaut E+F et échouerait sur le style établi du code).
+    "pyproject.toml":               "pyproject.toml",
     "LICENSE":                      "LICENSE",
     ".gitignore":                   ".gitignore",
     ".gitattributes":               ".gitattributes",

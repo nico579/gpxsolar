@@ -357,7 +357,7 @@ def _do_release(tag, new_script, extras=None, dry_run=False):
             _download_with_progress(t["url"], dest)
         t["local"] = dest
 
-    print(f"\n[3/5] Patch des bundles internes...")
+    print("\n[3/5] Patch des bundles internes...")
     for t in targets:
         print(f"  • {t['name']} :")
         msg = _patch_asset(t["local"], t["kind"], new_script, extras=extras)
@@ -369,15 +369,15 @@ def _do_release(tag, new_script, extras=None, dry_run=False):
         print(f"      taille = {t['new_size']:,} bytes")
 
     if dry_run:
-        print(f"\n[4/5] Upload — DRY-RUN, skip.")
-        print(f"\n[5/5] Patch body — DRY-RUN, simulation :")
+        print("\n[4/5] Upload — DRY-RUN, skip.")
+        print("\n[5/5] Patch body — DRY-RUN, simulation :")
         sha_by_name = {t["name"]: t["new_sha"] for t in targets}
         _patch_release_body(rel["body"] or "", sha_by_name)
         print(f"\nDRY-RUN terminé. Archives patchées en cache : {cache_dir}")
-        print(f"  Pour pousser : python update_app.py --release  (sans --dry-run)\n")
+        print("  Pour pousser : python update_app.py --release  (sans --dry-run)\n")
         return
 
-    print(f"\n[4/5] Upload des assets patchés...")
+    print("\n[4/5] Upload des assets patchés...")
     for t in targets:
         print(f"  • {t['name']} :")
         code, _ = _gh_api(
@@ -396,7 +396,7 @@ def _do_release(tag, new_script, extras=None, dry_run=False):
             sys.exit(f"ERREUR UPLOAD asset {t['name']} : HTTP {code} : {body}")
         print(f"      UPLOAD {t['new_size'] / 1e6:.0f} Mo OK")
 
-    print(f"\n[5/5] Mise à jour du body de la release...")
+    print("\n[5/5] Mise à jour du body de la release...")
     sha_by_name = {t["name"]: t["new_sha"] for t in targets}
     new_body = _patch_release_body(rel["body"] or "", sha_by_name)
     code, _ = _gh_api(

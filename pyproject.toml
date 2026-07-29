@@ -1,0 +1,20 @@
+# pyproject.toml — configuration de l'outillage dev uniquement.
+# Le projet n'est pas packagé en module pip : gpxsolar.py est un script
+# autonome, distribué via les releases PyInstaller. Ce fichier ne sert
+# qu'à ruff (lint), en local (`python -m ruff check .`) et dans le CI.
+
+[tool.ruff]
+target-version = "py39"    # version Python minimale supportée par gpxsolar
+# Dossiers de travail locaux, jamais poussés sur le repo. Sans ces exclusions,
+# `ruff check .` en local remonterait les défauts du code TIERS embarqué dans
+# le build (dist_onedir/_internal/ = numba, qtpy, PyQt6… soit ~815 trouvailles
+# qui noient les 25 du vrai code).
+extend-exclude = ["dist_onedir", "build", "dist", "HGT", "LIDAR_CACHE",
+                  "RGEALTI_CACHE", "WorldCover", "GPX_Ombres"]
+
+[tool.ruff.lint]
+# Règles F (pyflakes) uniquement : imports inutilisés, variables mortes,
+# noms non définis, f-strings sans placeholder. Volontairement AUCUNE règle
+# de style (E/W/…) : le style du code est établi, on ne veut détecter que
+# les vrais défauts. Aligné sur le jumeau lidar2map.
+select = ["F"]

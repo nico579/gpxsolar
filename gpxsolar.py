@@ -499,7 +499,7 @@ def _bootstrap_venv_auto(force: bool = False):
         # Toutes les déps déjà importables : pas besoin de venv. Mais on l'annonce
         # pour que l'utilisateur ne s'attende pas à voir un venv apparaître.
         print(f"  [bootstrap] dependencies already available in {sys.executable}")
-        print(f"             venv not created - use --bootstrap=force to force creation")
+        print("             venv not created - use --bootstrap=force to force creation")
         return
 
     venv_bin = venv_path / ("Scripts" if is_windows else "bin")
@@ -538,7 +538,7 @@ def _bootstrap_venv_auto(force: bool = False):
     # Installation groupée des déps critiques + optionnelles
     pip_args_crit = [pkg for _, pkg in _DEPS_CRITIQUES]
     pip_args_opt  = [pkg for _, pkg in _DEPS_OPTIONNELLES]
-    print(f"  Installing dependencies in the venv (3-5 min)...")
+    print("  Installing dependencies in the venv (3-5 min)...")
     ok, err = _pip_install(venv_py, pip_args_crit + pip_args_opt, "venv-groupé")
     if not ok:
         print(f"  Bulk install failed, retrying without optional deps ({', '.join(pip_args_opt)})...")
@@ -662,7 +662,7 @@ def _installer_deps_et_quitter():
     print(f"  Installing dependencies in {venv_path} (3-5 min)...")
     ok, err = _pip_install(venv_py, crit + opt, "installer-deps")
     if not ok:
-        print(f"  Bulk install failed, retrying critical deps only...")
+        print("  Bulk install failed, retrying critical deps only...")
         ok, err = _pip_install(venv_py, crit, "installer-deps-crit")
         if ok:
             for o in opt:
@@ -775,7 +775,10 @@ try:
     import rasterio.features
     from rasterio.windows import Window
     
-    from rasterio.transform import rowcol, from_origin
+    # noqa F401 sur les noms non utilisés : dans ces blocs try/except, l'import
+    # EST la sonde de disponibilité (il fixe *_AVAILABLE). Les retirer ferait
+    # perdre la vérification que le sous-module se charge vraiment.
+    from rasterio.transform import rowcol, from_origin  # noqa: F401
     RASTERIO_AVAILABLE = True
 except ImportError:
     RASTERIO_AVAILABLE = False
@@ -793,10 +796,10 @@ except ImportError:
     SIMPLEKML_AVAILABLE = False
 
 try:
-    from shapely.geometry import Polygon, MultiPolygon, shape, Point, LineString
-    from shapely.strtree import STRtree
-    from shapely.ops import transform
-    
+    from shapely.geometry import Polygon, MultiPolygon, shape, Point, LineString  # noqa: F401
+    from shapely.strtree import STRtree  # noqa: F401
+    from shapely.ops import transform  # noqa: F401
+
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
@@ -1652,7 +1655,7 @@ def get_department_from_coords(lat, lon):
 
 
 
-def wc_to_height(wc_values):
+def wc_to_height(wc_values):  # noqa: F811  (voir _try_load_numba : le `global` le déclare, ce n'est pas une redéfinition)
     """Convertit codes WorldCover → hauteurs. Version pure-NumPy (par défaut).
     Remplacée par une version Numba jit au 1er calcul si numba est disponible
     (cf. _try_load_numba)."""
@@ -1872,7 +1875,6 @@ def compute_lidar_tiles_from_solar_rays_batched(
 
     # Distances le long du rayon
     distances = np.arange(step, max_distance + step, step, dtype=np.float64)
-    nd = distances.size
 
     # Temps UTC
     if start_time.tzinfo is None:
@@ -2610,7 +2612,7 @@ class HGTDataManager:
 
         self.lidar_manager.enabled = True
         total_loaded = sum(len(v.cache) for v in self.lidar_manager.rasters.values())
-        self.log(f"✓ LiDAR initialisé:")
+        self.log("✓ LiDAR initialisé:")
         self.log(f"  - Tuiles en RAM: {total_loaded} (~{total_loaded * 15:.0f} MB)")
 
 
@@ -3510,7 +3512,7 @@ def adaptive_distances(max_dist, initial_step=5.0):
 # appelée — typiquement avant le 1er calcul). _try_load_numba() les
 # remplace par leurs équivalents jit-compilés.
 
-def compute_ray_intersections_detailed(obstacle_profile, ground_profile,
+def compute_ray_intersections_detailed(obstacle_profile, ground_profile,  # noqa: F811
                                        object_heights, ray_altitudes, tolerance):
     """Fallback NumPy. Plus lent que Numba mais sémantiquement identique."""
     relief_covers = ground_profile > (ray_altitudes + tolerance)
@@ -3724,7 +3726,6 @@ def simulatehike(gpxobj, startdt, hgtmanager, localtz, direction, shadowmode,
     # l'ouverture de la GUI). Idempotent — no-op si déjà chargé.
     _try_load_numba()
 
-    starttimesim = datetime.now()
     rawpoints = gpx_all_points(gpxobj)
     simpoints = rawpoints if direction == "CW" else rawpoints[::-1]
     totalpoints = len(simpoints)
@@ -4860,8 +4861,6 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
 
             # Créer un seul placemark combiné pour Départ & Arrivée afin d'éviter le chevauchement
             p_start = processed_data[0]['point']
-            p_end = processed_data[-1]['point']
-            km0 = cumdist[0] / 1000.0
             km_end = (cumdist[-1] / 1000.0) if len(cumdist) == len(processed_data) else 0.0
 
             start_local_str = start_time.astimezone(display_tz).strftime('%Y-%m-%d %H:%M %Z')
@@ -4880,8 +4879,6 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                 f"Arrivée (UTC): {end_utc_str}\n"
                 f"Distance totale: {km_end:.2f} km"
             )
-
-            last_added_time = start_time
 
             next_time = start_time + timedelta(minutes=passage_interval_min)
             idx = 0
@@ -4902,7 +4899,6 @@ def create_kml_file(original_path, processed_data, passage_interval_min=0, local
                     pm.description = f"Heure: {next_time.astimezone(display_tz).strftime('%Y-%m-%d %H:%M %Z')}\nDistance: {km:.2f} km"
                 pm.description = f"Distance depuis départ: {km:.2f} km"
                 pm.style.iconstyle.scale = 0.8
-                last_added_time = next_time
                 idx += 1
                 next_time = next_time + timedelta(minutes=passage_interval_min)
 
