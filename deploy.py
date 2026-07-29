@@ -32,7 +32,9 @@ Prérequis :
 import argparse
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -195,6 +197,19 @@ def get_latest_tag(repo: str) -> str:
         fail(f"aucune release sur {repo}")
     return tag
 
+def read_code_version() -> str:
+    """Lit la constante VERSION de gpxsolar.py : SOURCE UNIQUE de la version.
+
+    Le tag de release en est dérivé (v<VERSION>), au lieu d'être saisi une 2e
+    fois : sans ça, tag et constante peuvent diverger (le titre de fenêtre
+    annoncerait une version, la release une autre).
+    """
+    txt = (SRC / APP_PY).read_text(encoding="utf-8")
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', txt, re.M)
+    if not m:
+        fail(f"constante VERSION introuvable dans {APP_PY}")
+    return m.group(1)
+
 def find_python() -> str:
     for name in ("python", "python3", "py"):
         if shutil.which(name):
@@ -202,6 +217,31 @@ def find_python() -> str:
     fail("python introuvable dans le PATH (requis pour --mode local)")
 
 # === PUSH PHASE ==============================================================
+
+def rmtree_force(path, ignore_errors: bool = False):
+    """shutil.rmtree qui survit aux fichiers en lecture seule.
+
+    git marque ses objets (.git/objects/**) en lecture seule. Sous Windows,
+    os.unlink refuse alors de les supprimer et rmtree remonte un
+    PermissionError [WinError 5] — vécu en supprimant un clone temp corrompu.
+    Le handler retire le flag puis retente. Sous POSIX il ne sert jamais :
+    c'est le droit d'écriture du DOSSIER qui gouverne la suppression, pas
+    celui du fichier.
+    """
+    def _retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            if not ignore_errors:
+                raise
+    # onexc remplace onerror depuis Python 3.12 (onerror déprécié).
+    kw = {"onexc": _retry} if sys.version_info >= (3, 12) else {"onerror": _retry}
+    try:
+        shutil.rmtree(path, **kw)
+    except OSError:
+        if not ignore_errors:
+            raise
 
 def clone_or_pull():
     if (CLONE / ".git").exists():
@@ -216,10 +256,10 @@ def clone_or_pull():
             return
         cprint(f"    Clone temp corrompu (fetch code {r.returncode}) — "
                f"suppression + re-clone.", "yellow")
-        shutil.rmtree(CLONE, ignore_errors=True)
+        rmtree_force(CLONE, ignore_errors=True)
     cprint(f"==> Clone {REPO_URL} -> {CLONE}", "cyan")
     if CLONE.exists():
-        shutil.rmtree(CLONE)
+        rmtree_force(CLONE)
     # Clone initial : peut prendre 1-2 min (assets binaires, screenshots).
     run(["git", "clone", REPO_URL, str(CLONE)], timeout=300)
 
@@ -255,7 +295,7 @@ def mirror_folders():
         d = CLONE / dst_name
         if s.exists():
             if d.exists():
-                shutil.rmtree(d)
+                rmtree_force(d)
             shutil.copytree(s, d, ignore=ignore)
             count = sum(1 for p in s.rglob("*") if p.is_file() and not _is_artefact(p))
             print(f"    OK  {src_name:<32} -> {dst_name}  ({count} fichiers)")
@@ -371,8 +411,11 @@ def main():
                         help="voie de patch (défaut: cloud = update.yml sur GitHub)")
     parser.add_argument("--patch-tag", default="",
                         help="tag existant à patcher (défaut: dernière release)")
-    parser.add_argument("--new-tag", default="",
-                        help="nouveau tag git à créer → déclenche release.yml (rebuild complet)")
+    parser.add_argument("--new-tag", nargs="?", const="AUTO", default="",
+                        help="rebuild complet via un nouveau tag git → déclenche "
+                             "release.yml. Sans valeur : tag dérivé de VERSION "
+                             "(v<VERSION>, source unique). Avec valeur vX.Y.Z : "
+                             "acceptée mais doit égaler v<VERSION>, sinon refus.")
     parser.add_argument("--skip-push", action="store_true",
                         help="sauter push+détection, patcher directement la release")
     parser.add_argument("--push-only", action="store_true",
@@ -383,6 +426,19 @@ def main():
     parser.add_argument("--repo", default=REPO_DEFAULT,
                         help=f"repo GitHub cible (défaut: {REPO_DEFAULT})")
     args = parser.parse_args()
+
+    # --- Version : source unique (constante VERSION) -> tag dérivé ---
+    # Le tag n'est jamais une 2e saisie de la version : soit on le dérive de
+    # VERSION (--new-tag sans valeur), soit on vérifie que la valeur explicite
+    # colle. Impossible de tagguer v1.4.0 avec VERSION restée à 1.3.x.
+    if args.new_tag:
+        want = f"v{read_code_version()}"
+        if args.new_tag == "AUTO":
+            args.new_tag = want
+        elif args.new_tag != want:
+            fail(f"--new-tag {args.new_tag} != {want} (constante VERSION dans "
+                 f"{APP_PY}). La version a UNE source : bumpe VERSION, puis "
+                 f"passe --new-tag sans valeur (le tag est dérivé).")
 
     # --- Validation ---
     if args.new_tag and args.skip_push:

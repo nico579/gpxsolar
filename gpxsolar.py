@@ -312,6 +312,14 @@ if getattr(sys, "frozen", False):
         # Pas de bundle.zip → exe onedir lancé directement → continuer.
 
 
+# Version applicative — SOURCE UNIQUE : utilisée par --version, par le titre
+# de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
+# Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
+# APP_VERSION étaient deux littéraux libres de diverger.
+VERSION      = "1.3.3"
+VERSION_DATE = "2026-07"
+
+
 _DEPS_CRITIQUES = [
     # (module à importer, paquet pip)
     ("pytz",            "pytz"),
@@ -5235,9 +5243,9 @@ def show_form(args, tz_finder, output_default):
     import webview
     import json
 
-    # Alignée sur --version (l'ancien "v28.5" était un compteur interne
-    # divergent de la version publiée).
-    APP_VERSION = "v1.3.3"
+    # Dérivée de la constante VERSION (source unique) : l'ancien "v28.5" était
+    # un compteur interne divergent de la version publiée.
+    APP_VERSION = f"v{VERSION}"
     config = load_config()
 
     # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
@@ -5826,7 +5834,8 @@ def main():
         return fv
 
     parser = argparse.ArgumentParser(description="GPX Solar Shadow Analyzer (LiDAR integrated)", formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument('--version', action='version', version='gpxsolar 1.3.3 (2026-07)')
+    parser.add_argument('--version', action='version',
+                        version=f'gpxsolar {VERSION} ({VERSION_DATE})')
     parser.add_argument('--output', default='analyse_solaire.csv', help='Output CSV file')
     parser.add_argument('--hgt-dir', default='HGT', help='Directory for HGT files (for SRTM/Copernicus)')
     parser.add_argument('--dem-source', default='srtm1', choices=list(HGTDataManager.SOURCES.keys()), help='Default DEM source')
