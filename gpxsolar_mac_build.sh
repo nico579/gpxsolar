@@ -6,7 +6,8 @@
 #   2. zip                        -> build/gpxsolar_bundle.zip
 #   3. PyInstaller launcher .app  -> dist/GPXSOLAR.app       (launcher léger)
 #      + copie gpxsolar_bundle.zip dans Contents/Resources/
-#   4. Archive zip distribuable (ditto) -> dist/gpxsolar-macos-arm64.zip
+#   4. Archive zip distribuable (ditto) -> dist/gpxsolar-macos-<arch>.zip
+#      (arm64 sur Apple Silicon, x86_64 sur Intel)
 #
 # Usage :
 #   bash gpxsolar_mac_build.sh
@@ -34,6 +35,12 @@ BUILD_DIR="$ROOT/build"
 BUNDLE_ZIP="$BUILD_DIR/gpxsolar_bundle.zip"
 FINAL_OUT="$ROOT/dist"
 FINAL_APP="$FINAL_OUT/GPXSOLAR.app"
+
+# Archi du livrable : celle du Python du venv, pas celle du shell. PyInstaller
+# produit un binaire pour l'interpreteur qu'il utilise ; sous Rosetta, `uname -m`
+# mentirait (x86_64 alors que le venv peut etre arm64, ou l'inverse).
+ARCH="$("$VENV/bin/python" -c 'import platform; print(platform.machine())')"
+echo "Architecture cible : $ARCH"
 
 # ── 1. PyInstaller onedir ─────────────────────────────────────────────────────
 echo ""
@@ -89,7 +96,7 @@ FINAL_SIZE=$(du -sm "$FINAL_APP" | cut -f1)
 rm -f "$FINAL_OUT/gpxsolar"
 
 # ── 4. Archive zip distribuable (ditto preserve perms + symlinks + xattrs) ───
-RELEASE_ZIP="$FINAL_OUT/gpxsolar-macos-arm64.zip"
+RELEASE_ZIP="$FINAL_OUT/gpxsolar-macos-$ARCH.zip"
 echo ""
 echo "[4/4] Archive distribution (ditto)..."
 rm -f "$RELEASE_ZIP"

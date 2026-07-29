@@ -116,6 +116,7 @@ No Python for the end user to install. The deliverable carries its own runtime
 | Windows 10/11 (x86_64) | `gpxsolar-windows-x86_64.zip` | `Expand-Archive` or double-click |
 | Linux Ubuntu 24.04+ (x86_64) | `gpxsolar-linux-x86_64.tar.gz` | `tar xzf` |
 | macOS 12+ (Apple Silicon) | `gpxsolar-macos-arm64.zip` | `unzip` then `xattr -dr com.apple.quarantine GPXSOLAR.app` |
+| macOS 12+ (Intel) | `gpxsolar-macos-x86_64.zip` | same |
 
 The archive contains the binary/launcher and its `gpxsolar_bundle.zip` side by side.
 
@@ -130,13 +131,16 @@ cd gpxsolar
 .\gpxsolar_win_build.ps1      # 2. Build -> dist\gpxsolar.exe + dist\gpxsolar_bundle.zip
 ```
 
-##### macOS (Apple Silicon)
+##### macOS (Apple Silicon or Intel)
 ```bash
 git clone https://github.com/nico579/gpxsolar
 cd gpxsolar
 bash setup_build_mac.sh       # 1. Setup
-bash gpxsolar_mac_build.sh    # 2. Build -> dist/GPXSOLAR.app + dist/gpxsolar-macos-arm64.zip
+bash gpxsolar_mac_build.sh    # 2. Build -> dist/GPXSOLAR.app + dist/gpxsolar-macos-<arch>.zip
 ```
+The archive takes the architecture of the machine it is built on (`arm64` or
+`x86_64`). PyInstaller does not cross-compile, so an Intel build requires an
+Intel Mac (or Rosetta 2 with an x86_64 Python).
 
 ##### Linux (Ubuntu / Debian)
 Linux reuses the `gpxsolar_win.spec` spec (PyInstaller produces an ELF on Linux —
