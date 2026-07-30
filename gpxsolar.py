@@ -316,7 +316,7 @@ if getattr(sys, "frozen", False):
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.3.3"
+VERSION      = "1.3.4"
 VERSION_DATE = "2026-07"
 
 
