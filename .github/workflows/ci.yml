@@ -8,6 +8,7 @@ on:
       - '_loader.py'
       - 'deploy.py'
       - 'update_app.py'
+      - 'smoke_gpxsolar.py'
       - 'pyproject.toml'
       - '.github/workflows/ci.yml'
   pull_request:
@@ -17,6 +18,7 @@ on:
       - '_loader.py'
       - 'deploy.py'
       - 'update_app.py'
+      - 'smoke_gpxsolar.py'
       - 'pyproject.toml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:

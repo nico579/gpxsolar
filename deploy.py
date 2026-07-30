@@ -66,6 +66,8 @@ MAP = {
     # Source
     "gpxsolar.py":                  "gpxsolar.py",
     "test_gpxsolar.py":             "test_gpxsolar.py",
+    # Smoke réseau (cron hebdo via smoke.yml, jamais sur push).
+    "smoke_gpxsolar.py":            "smoke_gpxsolar.py",
     # Trace témoin du run de validation manuel (BUILD.md §7)
     "2026-05-16_13-31.gpx":         "2026-05-16_13-31.gpx",
     "_loader.py":                   "_loader.py",
@@ -91,6 +93,7 @@ MAP = {
     "release_github.yml":           ".github/workflows/release.yml",
     "update_github.yml":            ".github/workflows/update.yml",
     "cross_platform_github.yml":    ".github/workflows/cross_platform.yml",
+    "smoke_github.yml":             ".github/workflows/smoke.yml",
     # Config ruff : le job lint du CI en dépend (sans elle, ruff appliquerait
     # ses règles par défaut E+F et échouerait sur le style établi du code).
     "pyproject.toml":               "pyproject.toml",

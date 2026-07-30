@@ -1673,6 +1673,10 @@ def wc_to_height(wc_values):  # noqa: F811  (voir _try_load_numba : le `global` 
 
 class VegetationManager:
     VEGETATION_HEIGHTS = {10: 15.0, 20: 3.0, 30: 0.5, 40: 0.5, 50: 0.0, 60: 0.0, 70: 0.0, 80: 0.0, 90: 2.0, 95: 10.0, 100: 0.2}
+    # Gabarit d'URL en constante (et pas en littéral dans _download_tile) : le
+    # smoke test réseau l'utilise pour un HEAD, une tuile pesant ~120 Mo.
+    WORLDCOVER_URL = ("https://esa-worldcover.s3.eu-central-1.amazonaws.com"
+                      "/v200/2021/map/ESA_WorldCover_10m_2021_v200_{tile}_Map.tif")
     def __init__(self, worldcover_dir="WorldCover", auto_download=True, progress_callback=None):
         self.worldcover_dir, self.auto_download = worldcover_dir, auto_download
         self.datasets, self.height_cache, self.missing_tiles = {}, {}, set()
@@ -1691,12 +1695,12 @@ class VegetationManager:
         return f"{ns}{abs(lat_tile):02d}{ew}{abs(lon_tile):03d}"
 
     def _download_tile(self, tile_name):
-        url = f"https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_{tile_name}_Map.tif"
+        url = self.WORLDCOVER_URL.format(tile=tile_name)
         output_path = os.path.join(self.worldcover_dir, os.path.basename(url))
         if os.path.exists(output_path):
              return self._load_single_tile(os.path.basename(url))
 
-        logging.info(f"Downloading vegetation {tile_name} (~1GB)...")
+        logging.info(f"Downloading vegetation {tile_name} (~120 MB)...")
         # Temp UNIQUE (pid+thread) : plusieurs workers de blocs peuvent
         # constater l'absence de la même tuile en même temps ; avec un .part
         # partagé, l'un pouvait renommer/supprimer le fichier pendant que
@@ -2626,6 +2630,10 @@ class HGTDataManager:
     # l'altitude aux points de la trace). Même source que le script colorer_pente
     # de Nico (module alti_ign). Ne remplace PAS le raster en mode ombre (le
     # ray-tracing a besoin d'une grille autour de la trace).
+    # Base S3 en constante (et pas en littéral dans _download_copernicus_tile) :
+    # le smoke test réseau l'utilise pour un HEAD sans tirer la tuile entière.
+    COPERNICUS_BASE_URL = "https://copernicus-dem-30m.s3.amazonaws.com"
+
     GEOPF_ALTI_URL = "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevation.json"
     GEOPF_ALTI_RESOURCE = "ign_rge_alti_wld"   # RGE ALTI (LiDAR 1 m sur la France)
     GEOPF_ALTI_MAXPTS = 5000                   # limite documentée du service
@@ -3401,8 +3409,7 @@ class HGTDataManager:
         if os.path.exists(output_path):
             return True # Déjà sur disque
         
-        base_url = "https://copernicus-dem-30m.s3.amazonaws.com"
-        url = f"{base_url}/{tile_name}/{filename}"
+        url = f"{self.COPERNICUS_BASE_URL}/{tile_name}/{filename}"
 
         # Temp UNIQUE (pid+thread) : plusieurs workers de blocs peuvent tenter
         # la même tuile en parallèle (cf. WorldCover/LidarManager).

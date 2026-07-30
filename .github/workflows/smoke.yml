@@ -1,0 +1,54 @@
+name: Smoke reseau
+
+# Test de fumée réseau des sources de données : le harness smoke_gpxsolar.py
+# importe gpxsolar et appelle SES vraies fonctions d'accès aux données sur un
+# point couvert (Toulouse). Détecte un endpoint tombé, une couche WMS renommée,
+# une API qui change de format. Lancé chaque semaine + à la demande (PAS sur
+# push : ça toucherait 7 endpoints externes à chaque déploiement).
+#
+# Motivation : l'endpoint IGN historique (archives .7z BDALTI/RGEALTI) est mort
+# à la migration cartes.gouv.fr et on ne l'a découvert qu'en l'utilisant. Les
+# sources actuelles (WMS + API altimétrique Géoplateforme) peuvent casser
+# pareil, et rien ne le signalerait avant un utilisateur.
+#
+# Charge utile volontairement minuscule (~17 s, quelques Mo) :
+#   - WMS exercé avec tile_px=40 au lieu de 2000, soit 6,4 Ko par tuile
+#   - WorldCover (~120 Mo) et Copernicus (~44 Mo) en HEAD seulement
+#   - seule la tuile SRTM3 est réellement tirée (1,3 Mo)
+#
+# Équivalent du smoke_providers.yml de lidar2map (30 providers LiDAR), réduit
+# au périmètre de gpxsolar.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"      # chaque lundi 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: smoke reseau (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GPXSOLAR_BOOTSTRAP: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Dependances critiques communes
+        # Même liste que ci.yml (l'import de gpxsolar les exige toutes).
+        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pywebview simplekml shapely Pillow pyproj rasterio
+
+      - name: Backend GUI Qt
+        # PyQt6 fait partie des deps critiques sous Linux (cf.
+        # _gui_deps_plateforme) : sans lui, le check de bootstrap échoue même
+        # si le smoke n'ouvre aucune fenêtre.
+        run: pip install PyQt6 PyQt6-WebEngine qtpy
+
+      - name: Smoke reseau
+        run: python smoke_gpxsolar.py
