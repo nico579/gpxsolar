@@ -25,6 +25,7 @@ produit un ELF sous Linux) :
   Linux   : pywebview -> PyQt6 + WebEngine (seul backend pip viable)
 """
 
+import re
 import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import (
@@ -41,6 +42,52 @@ CONSOLE = True
 NAME    = "gpxsolar"
 
 SRC = Path(SPECPATH)
+
+
+# Ressource VERSIONINFO du binaire Windows (ignoree sans effet sous Linux).
+# Un PE PyInstaller sans editeur, description ni copyright renseignes
+# ressemble statistiquement aux echantillons malveillants des jeux
+# d'entrainement de plusieurs moteurs antivirus a heuristique ML (constate
+# sur blink2video : faux positifs Reddit, confirmes par VirusTotal sur
+# plusieurs versions et sur lidar2map malgre un comportement different).
+def _version_info(version: str) -> str:
+    parties = (version.split(".") + ["0", "0", "0"])[:3]
+    tuple_version = tuple(int(p) for p in parties) + (0,)
+    chemin = SRC / ".version_info.txt"
+    chemin.write_text(f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={tuple_version},
+    prodvers={tuple_version},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [StringTable(
+        u'040904B0',
+        [StringStruct(u'CompanyName', u'nico579'),
+         StringStruct(u'FileDescription', u'gpxsolar - simulation solaire de parcours GPX'),
+         StringStruct(u'FileVersion', u'{version}'),
+         StringStruct(u'InternalName', u'gpxsolar'),
+         StringStruct(u'LegalCopyright', u'GPLv3 - nico579'),
+         StringStruct(u'OriginalFilename', u'gpxsolar.exe'),
+         StringStruct(u'ProductName', u'gpxsolar'),
+         StringStruct(u'ProductVersion', u'{version}')])
+      ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+""", encoding="utf-8")
+    return str(chemin)
+
+
+_texte_version = (SRC / "gpxsolar.py").read_text(encoding="utf-8")
+_m_version = re.search(r'^VERSION\s*=\s*"([^"]+)"', _texte_version, re.M)
+VERSION = _m_version.group(1) if _m_version else "0.0.0"
 
 datas         = []
 binaries      = []
@@ -235,6 +282,7 @@ if ONEFILE:
         disable_windowed_traceback=False, argv_emulation=False,
         target_arch=None, codesign_identity=None, entitlements_file=None,
         icon=None,
+        version=_version_info(VERSION),
     )
 else:
     exe = EXE(
@@ -244,6 +292,7 @@ else:
         console=CONSOLE, disable_windowed_traceback=False,
         argv_emulation=False, target_arch=None,
         codesign_identity=None, entitlements_file=None, icon=None,
+        version=_version_info(VERSION),
     )
     coll = COLLECT(
         exe, a.binaries, a.datas,
