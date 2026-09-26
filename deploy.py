@@ -4,38 +4,26 @@
 Ce dossier de travail EST le dépôt git depuis le 26 septembre 2026 : deploy.py
 commit et pousse directement ici, sur le modèle de lidar2map. Plus de clone
 temporaire ni de table de correspondance de noms : README.md, BUILD.md et
-.github/workflows/ portent ici leur vrai nom. Seuls les fichiers déjà suivis
-partent (git add -u) : un fichier nouveau non ignoré bloque le déploiement
-tant qu'il n'a pas été ajouté (git add) ou ignoré (.gitignore pour tous,
-.git/info/exclude pour soi seul), ce dossier accumulant traces, caches et
-sauvegardes personnels qu'un git add -A publierait.
+.github/workflows/ portent ici leur vrai nom. Plus de patch des bundles sans
+reconstruction non plus (update_app.py et update.yml retirés le 26 septembre
+2026, comme lidar2map en 1.53) : toute livraison passe par une release
+reconstruite par release.yml, que déclenche un tag.
 
-Un seul script pour tout :
-  • push des sources vers le repo GitHub
-  • détection automatique de ce qui a changé
-  • action :
-        - docs / meta seulement     -> push seul
-        - gpxsolar.py seul          -> push + patch des 3 bundles (sans rebuild)
-        - .spec / _loader / build.* -> push puis STOP : rebuild via release.yml
-                                       (via --new-tag, choix de version humain)
-
-Deux voies pour le patch :
-  --mode cloud (défaut)  déclenche update.yml sur le runner GitHub
-                         -> les ~1,5 Go transitent sur le réseau GitHub
-  --mode local           lance update_app.py --release ici
-                         -> les ~1,5 Go transitent par TA connexion
+Seuls les fichiers déjà suivis partent (git add -u) : un fichier nouveau non
+ignoré bloque le déploiement tant qu'il n'a pas été ajouté (git add) ou
+ignoré (.gitignore pour tous, .git/info/exclude pour soi seul), ce dossier
+accumulant traces, caches et sauvegardes personnels qu'un git add -A
+publierait.
 
 Usage :
-  python deploy.py -m "mon correctif"                         # cloud, dernière release
-  python deploy.py -m "..." --mode local                      # patch local
-  python deploy.py -m "..." --patch-tag v1.0.2                # cibler un tag existant
-  python deploy.py -m "..." --new-tag v1.0.3                  # créer nouveau tag → rebuild
-  python deploy.py -m "..." --skip-push                       # patch direct (pas de push)
-  python deploy.py -m "..." --dry-run                         # voir le diff sans push
+  python deploy.py -m "mon correctif"        # tests + push, pas de release
+  python deploy.py -m "..." --new-tag        # tests + push + tag v<VERSION> + suivi du build
+  python deploy.py -m "..." --new-tag v1.5.0 # accepté seulement si ça égale v<VERSION>
+  python deploy.py -m "..." --dry-run        # affiche le diff, ne commit ni ne pousse
+  python deploy.py -m "..." --skip-tests     # saute tests et ruff (déconseillé)
 
-Prérequis :
-  python (>=3.8), git, gh (authentifié : gh auth status).
-  --mode local : GH_TOKEN/GITHUB_TOKEN dans l'env (ou gh auth token disponible).
+Prérequis : git, gh (authentifié : gh auth status), ruff pour le contrôle de
+style (averti s'il manque).
 """
 
 import argparse
@@ -59,33 +47,20 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-# === CONFIG (à adapter par projet) ===========================================
+# === CONFIG ===================================================================
 
-PROJECT = "gpxsolar"
-APP_PY = "gpxsolar.py"
-REPO_DEFAULT = "nico579/gpxsolar"
-
+REPO = "nico579/gpxsolar"
+VERSION_FILE = "gpxsolar.py"
+# Les tests hors réseau que lance aussi la CI (ci.yml), dans le même ordre.
+# gpxsolar n'a pas de lanceur de suites comme le tests/run_tests.py de
+# lidar2map : deux scripts suffisent.
+TESTS = ("test_gpxsolar.py", "test_dossiers.py")
 SRC = Path(__file__).resolve().parent
 BRANCHE_RELEASE = "main"
 SHA_GIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TAG_RELEASE_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
-# Patterns "rebuild requis" : si l'un de ces fichiers a changé, le patch ne
-# suffit pas (l'archive launcher PyInstaller ou la spec ne sont pas patchables).
-# Un module interne importé par gpxsolar.py (_dossiers.py, _atomic_files.py,
-# ...) est compilé dans le bundle : le patch, qui ne remplace que gpxsolar.py
-# et gui/, livrerait un gpxsolar.py qui l'importe sans lui.
-def is_rebuild_file(name: str) -> bool:
-    return (
-        name == "_loader.py"
-        or (name.startswith("_") and name.endswith(".py"))
-        or name.endswith(".spec")
-        or name.endswith("_build.ps1")
-        or name.endswith("_build.sh")
-        or name.startswith("setup_build_")
-    )
-
-# === COLOR / IO HELPERS ======================================================
+# === COLOR / IO HELPERS =======================================================
 
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 if os.name == "nt" and _USE_COLOR:
@@ -103,61 +78,51 @@ if os.name == "nt" and _USE_COLOR:
 _COLORS = {"cyan": "\033[36m", "yellow": "\033[33m",
            "red": "\033[31m", "green": "\033[32m"}
 
+
 def cprint(msg: str, color: str = "") -> None:
     if _USE_COLOR and color in _COLORS:
         print(f"{_COLORS[color]}{msg}\033[0m")
     else:
         print(msg)
 
+
 def fail(msg: str) -> NoReturn:
     cprint(f"\nERREUR : {msg}", "red")
     sys.exit(1)
 
-# === SHELL HELPERS ===========================================================
 
-def run(cmd, cwd=None, check=True, capture=False, env=None, timeout=120):
-    """Wrapper subprocess.run. capture=True -> renvoie stdout (texte).
+# === SHELL HELPERS ============================================================
 
-    timeout : secondes avant abandon. 120s suffit pour la majorité des git/gh
-    opérations. Pour les commandes longues par nature (git clone d'un repo
-    avec gros assets, gh run watch sur update.yml, update_app.py --release
-    qui upload ~1,5 Go), passer un timeout explicite plus large au call site."""
+def run(cmd, check=True, capture=False, env=None, timeout=120):
     try:
+        # UTF-8 explicite : les tests écrivent en UTF-8 (PYTHONUTF8=1, voir
+        # preflight), et le décodage par défaut en cp1252 plantait le fil
+        # lecteur sur certains octets, en noyant la vraie erreur.
         result = subprocess.run(
-            cmd, cwd=str(cwd) if cwd else None,
-            check=False, text=True, encoding="utf-8", errors="replace",
+            cmd, cwd=str(SRC), check=False, text=True,
+            encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
             env=env,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        fail(f"{' '.join(cmd)} a dépassé le timeout ({timeout}s) — réseau bloqué ou commande hangée ?")
+        fail(f"{' '.join(cmd)} a dépassé le timeout ({timeout}s).")
     if check and result.returncode != 0:
-        cmd_str = " ".join(cmd)
         err = (result.stderr or result.stdout or "").strip()
-        fail(f"{cmd_str} a échoué (code {result.returncode})" + (f"\n{err}" if err else ""))
+        fail(f"{' '.join(cmd)} a échoué (code {result.returncode})" + (f"\n{err}" if err else ""))
     return result
+
 
 def git(*args, check=True, capture=False):
     """git <args>, dans le dossier de travail (qui est le dépôt)."""
-    return run(["git", *args], cwd=SRC, check=check, capture=capture)
+    return run(["git", *args], check=check, capture=capture)
+
 
 def gh_json(*args):
-    """gh ... --json X (renvoie le JSON parsé)."""
     res = run(["gh", *args], capture=True)
     return json.loads(res.stdout)
 
-def get_latest_tag(repo: str) -> str:
-    res = run(["gh", "release", "view", "--repo", repo, "--json", "tagName"],
-              capture=True, check=False)
-    if res.returncode != 0:
-        fail(f"aucune release sur {repo} (crée-en une via release.yml, ou passe --patch-tag)")
-    data = json.loads(res.stdout)
-    tag = data.get("tagName", "")
-    if not tag:
-        fail(f"aucune release sur {repo}")
-    return tag
 
 def read_code_version() -> str:
     """Lit la constante VERSION de gpxsolar.py : SOURCE UNIQUE de la version.
@@ -166,22 +131,16 @@ def read_code_version() -> str:
     fois : sans ça, tag et constante peuvent diverger (le titre de fenêtre
     annoncerait une version, la release une autre).
     """
-    txt = (SRC / APP_PY).read_text(encoding="utf-8")
+    txt = (SRC / VERSION_FILE).read_text(encoding="utf-8")
     m = re.search(r'^VERSION\s*=\s*"([^"]+)"', txt, re.M)
     if not m:
-        fail(f"constante VERSION introuvable dans {APP_PY}")
+        fail(f"constante VERSION introuvable dans {VERSION_FILE}")
     return m.group(1)
 
-def find_python() -> str:
-    for name in ("python", "python3", "py"):
-        if shutil.which(name):
-            return name
-    fail("python introuvable dans le PATH (requis pour --mode local)")
-
-# === PUSH PHASE ==============================================================
 
 def _sortie_git(*args) -> str:
     return git(*args, capture=True).stdout.strip()
+
 
 def _remote_officiel(url: str) -> bool:
     """Reconnaît uniquement le dépôt GitHub attendu, sans alias ni userinfo.
@@ -189,7 +148,7 @@ def _remote_officiel(url: str) -> bool:
     Le suffixe .git est facultatif en https : actions/checkout pose l'URL sans
     lui (workflow « deploy.py cross-platform »)."""
     url = str(url or "").strip()
-    if url == f"git@github.com:{REPO_DEFAULT}.git":
+    if url == f"git@github.com:{REPO}.git":
         return True
     try:
         parsed = urllib.parse.urlparse(url)
@@ -201,18 +160,20 @@ def _remote_officiel(url: str) -> bool:
     if parsed.scheme == "https":
         return (propre and parsed.hostname == "github.com"
                 and parsed.username is None and port is None
-                and parsed.path in (f"/{REPO_DEFAULT}", f"/{REPO_DEFAULT}.git"))
+                and parsed.path in (f"/{REPO}", f"/{REPO}.git"))
     if parsed.scheme == "ssh":
         return (propre and parsed.hostname == "github.com"
                 and parsed.username == "git" and port in (None, 22)
-                and parsed.path == f"/{REPO_DEFAULT}.git")
+                and parsed.path == f"/{REPO}.git")
     return False
+
 
 def _sha_git(valeur: str, contexte: str) -> str:
     valeur = str(valeur or "").strip().lower()
     if not SHA_GIT_RE.fullmatch(valeur):
         fail(f"SHA Git invalide pour {contexte} : {valeur!r}")
     return valeur
+
 
 def _sha_remote(ref: str, obligatoire: bool = True) -> str:
     """Lit une référence distante sans modifier le dépôt ni ses refs locales."""
@@ -227,6 +188,7 @@ def _sha_remote(ref: str, obligatoire: bool = True) -> str:
     if len(lignes) != 1 or len(lignes[0]) != 2 or lignes[0][1] != ref:
         fail(f"réponse ambiguë de origin pour {ref}")
     return _sha_git(lignes[0][0], ref)
+
 
 def verifier_depot(new_tag: str = "") -> str:
     """Refuse de déployer depuis une branche, un remote ou un HEAD inattendu.
@@ -244,7 +206,7 @@ def verifier_depot(new_tag: str = "") -> str:
     push_url = _sortie_git("remote", "get-url", "--push", "origin")
     if not _remote_officiel(fetch_url) or not _remote_officiel(push_url):
         fail(f"origin doit pointer en lecture et écriture vers le dépôt officiel "
-             f"github.com/{REPO_DEFAULT}.\nfetch={fetch_url!r}\npush={push_url!r}")
+             f"github.com/{REPO}.\nfetch={fetch_url!r}\npush={push_url!r}")
 
     local = _sha_git(_sortie_git("rev-parse", "HEAD"), "HEAD local")
     distant = _sha_remote(f"refs/heads/{BRANCHE_RELEASE}")
@@ -264,6 +226,7 @@ def verifier_depot(new_tag: str = "") -> str:
             fail(f"le tag {new_tag} existe déjà sur origin")
     return local
 
+
 def verifier_fichiers_nouveaux() -> None:
     """Bloque sur tout fichier nouveau ni suivi ni ignoré (voir le docstring
     du module) : l'ajouter ou l'ignorer est un choix explicite."""
@@ -273,6 +236,36 @@ def verifier_fichiers_nouveaux() -> None:
              + "\n  ".join(nouveaux)
              + "\nAjoute-les (git add) ou ignore-les (.gitignore pour tous, "
                ".git/info/exclude pour toi seul), puis relance.")
+
+
+# === PRE-FLIGHT ===============================================================
+
+def preflight() -> None:
+    """Les tests hors réseau de la CI, puis ruff, avant de pousser : le
+    jumeau lidar2map fait de même avec ses suites. BOOTSTRAP=none, comme en
+    CI : un test ne doit jamais créer le venv ~/.gpxsolar/venv."""
+    env = dict(os.environ, PYTHONUTF8="1", GPXSOLAR_BOOTSTRAP="none")
+    for script in TESTS:
+        cprint(f"==> python {script}", "cyan")
+        res = run([sys.executable, script], check=False, capture=True,
+                  env=env, timeout=900)
+        if res.returncode != 0:
+            print((res.stdout or "")[-6000:] + (res.stderr or ""))
+            fail(f"{script} en échec - corrige avant de pousser.")
+        cprint("    OK", "green")
+
+    if shutil.which("ruff") is None:
+        cprint("==> ruff introuvable : contrôle de style sauté (pip install ruff)", "yellow")
+        return
+    cprint("==> ruff check .", "cyan")
+    res = run(["ruff", "check", "."], check=False, capture=True)
+    if res.returncode != 0:
+        print((res.stdout or "") + (res.stderr or ""))
+        fail("ruff signale des erreurs - corrige avant de pousser.")
+    cprint("    OK", "green")
+
+
+# === PUSH + TAG ===============================================================
 
 def compute_diff(dry_run: bool = False) -> list:
     cprint("\n==> Modifications :", "cyan")
@@ -295,15 +288,17 @@ def compute_diff(dry_run: bool = False) -> list:
     changed = _sortie_git("diff", "--cached", "--name-only").splitlines()
     return [c.strip() for c in changed if c.strip()]
 
+
 def _publier_tag(tag: str, sha: str) -> None:
     cprint(f"\n==> Tag {tag}", "cyan")
-    git("tag", "-a", tag, "-m", f"{PROJECT} {tag}", sha)
+    git("tag", "-a", tag, "-m", f"gpxsolar {tag}", sha)
     git("push", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
     distant = _sha_remote(f"refs/tags/{tag}^{{}}")
     if distant != sha:
         fail(f"le tag distant {tag} pointe vers {distant}, attendu {sha}")
 
-def commit_and_push(message: str, new_tag: str = "") -> str:
+
+def commit_and_push(message: str, new_tag: str) -> str:
     cprint("\n==> Commit", "cyan")
     git("commit", "-m", message)
     sha = _sha_git(_sortie_git("rev-parse", "HEAD"), "commit créé")
@@ -316,204 +311,99 @@ def commit_and_push(message: str, new_tag: str = "") -> str:
         _publier_tag(new_tag, sha)
     return sha
 
-# === RELEASE PHASE (patch d'une release existante) ===========================
 
-def invoke_cloud(repo: str, target_tag: str):
-    cprint(f"\n==> Déclenchement de update.yml sur {target_tag} (voie cloud)", "cyan")
-    run(["gh", "workflow", "run", "update.yml", "--repo", repo, "-f", f"tag={target_tag}"])
-
+def watch_release(tag: str, sha: str) -> None:
+    """Le tag poussé déclenche release.yml tout seul (on: push: tags: v*) :
+    il ne reste qu'à retrouver le run et attendre la fin."""
+    cprint(f"\n==> {tag} poussé -> release.yml se déclenche (build 4 runners, ~30 min)", "cyan")
     run_id = None
-    for _ in range(6):
+    for _ in range(12):
         time.sleep(5)
-        runs = gh_json("run", "list", "--repo", repo, "--workflow", "update.yml",
-                       "--limit", "1", "--json", "databaseId")
+        runs = gh_json("run", "list", "--repo", REPO, "--workflow", "release.yml",
+                       "--event", "push", "--commit", sha,
+                       "--limit", "1", "--json", "databaseId,headSha")
         if runs:
-            run_id = runs[0]["databaseId"]
-            break
+            candidat = runs[0]
+            if str(candidat.get("headSha") or "").lower() == sha:
+                run_id = candidat["databaseId"]
+                break
     if not run_id:
-        fail("run introuvable (voir l'onglet Actions du repo)")
-    print(f"    Run : https://github.com/{repo}/actions/runs/{run_id}")
+        cprint("    Run introuvable automatiquement - vérifie l'onglet Actions.", "yellow")
+        return
+    print(f"    Run : https://github.com/{REPO}/actions/runs/{run_id}")
 
-    cprint("==> Surveillance du run (~6-7 min)", "cyan")
-    # update.yml dure typiquement 5-7 min ; on tolère jusqu'à 20 min pour rester
-    # robuste si le runner GitHub est lent ce jour-là.
-    res = run(["gh", "run", "watch", str(run_id), "--repo", repo,
-               "--exit-status", "--interval", "20"], check=False, timeout=1200)
+    cprint("==> Surveillance du run", "cyan")
+    res = run(["gh", "run", "watch", str(run_id), "--repo", REPO,
+               "--exit-status", "--interval", "30"], check=False, timeout=3600)
     if res.returncode != 0:
-        fail(f"le run update.yml a échoué : gh run view {run_id} --repo {repo} --log-failed")
+        fail(f"le run release.yml a échoué : gh run view {run_id} --repo {REPO} --log-failed")
 
-    cprint(f"\n==> OK. Bundles de {target_tag} patchés sans rebuild (cloud).", "green")
-    print(f"    Release : https://github.com/{repo}/releases/tag/{target_tag}")
+    cprint(f"\n==> OK. {tag} publiée.", "green")
+    print(f"    Release : https://github.com/{REPO}/releases/tag/{tag}")
 
-def invoke_local(target_tag: str):
-    cprint(f"\n==> Patch local via update_app.py --release sur {target_tag} (voie locale)", "cyan")
-    cprint("    Les ~1,5 Go d'assets transitent par TA connexion (upload vers GitHub).", "yellow")
 
-    py = find_python()
+# === MAIN =====================================================================
 
-    env = os.environ.copy()
-    if "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env:
-        # Récupère le token de gh CLI si dispo, pour éviter à update_app.py
-        # le détour par git credential (qui peut prompter).
-        tok = run(["gh", "auth", "token"], capture=True, check=False)
-        if tok.returncode == 0 and tok.stdout.strip():
-            env["GH_TOKEN"] = tok.stdout.strip()
-        else:
-            cprint("    Note : aucun token dans l'env ni via gh ; update_app.py tentera git credential.", "yellow")
-
-    update_app = SRC / "update_app.py"
-    if not update_app.exists():
-        fail(f"update_app.py introuvable à côté ({update_app})")
-
-    # update_app.py --release : download 3 assets + patch + upload ~1,5 Go
-    # depuis la connexion locale. Tolère jusqu'à 40 min pour les connexions lentes.
-    run([py, str(update_app), "--release", "--tag", target_tag], env=env, timeout=2400)
-    cprint(f"\n==> OK. Bundles de {target_tag} patchés sans rebuild (local).", "green")
-    print(f"    Release : https://github.com/{REPO_DEFAULT}/releases/tag/{target_tag}")
-
-def invoke_patch(mode: str, repo: str, target_tag: str):
-    if mode == "local":
-        invoke_local(target_tag)
-    else:
-        invoke_cloud(repo, target_tag)
-
-# === MAIN ====================================================================
-
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         prog="deploy.py",
-        description=f"Déploiement unifié {PROJECT} — push + patch cloud/local + tag.",
+        description="Déploiement unifié gpxsolar - tests + push + tag + suivi du build.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Voir le docstring en tête du fichier pour les exemples.",
     )
-    parser.add_argument("-m", "--message", required=True,
-                        help="message de commit")
-    parser.add_argument("--mode", choices=["cloud", "local"], default="cloud",
-                        help="voie de patch (défaut: cloud = update.yml sur GitHub)")
-    parser.add_argument("--patch-tag", default="",
-                        help="tag existant à patcher (défaut: dernière release)")
+    parser.add_argument("-m", "--message", required=True, help="message de commit")
     parser.add_argument("--new-tag", nargs="?", const="AUTO", default="",
-                        help="rebuild complet via un nouveau tag git → déclenche "
-                             "release.yml. Sans valeur : tag dérivé de VERSION "
-                             "(v<VERSION>, source unique). Avec valeur vX.Y.Z : "
-                             "acceptée mais doit égaler v<VERSION>, sinon refus.")
-    parser.add_argument("--skip-push", action="store_true",
-                        help="sauter push+détection, patcher directement la release")
-    parser.add_argument("--push-only", action="store_true",
-                        help="pousser les sources sur main SANS patcher les bundles "
-                             "(itération debug/mesure : récup via git pull + run direct)")
+                        help="pousse aussi un tag -> déclenche release.yml. Sans "
+                             "valeur : dérivé de VERSION (v<VERSION>). Avec une "
+                             "valeur vX.Y.Z : acceptée seulement si elle égale "
+                             "v<VERSION>, sinon refusée.")
     parser.add_argument("--dry-run", action="store_true",
-                        help="afficher le diff sans commit ni push")
-    parser.add_argument("--repo", default=REPO_DEFAULT,
-                        help=f"repo GitHub cible (défaut: {REPO_DEFAULT})")
+                        help="affiche le diff sans commit ni push")
+    parser.add_argument("--skip-tests", action="store_true",
+                        help="saute les tests et ruff (déconseillé)")
     args = parser.parse_args()
 
-    # --- Version : source unique (constante VERSION) -> tag dérivé ---
-    # Le tag n'est jamais une 2e saisie de la version : soit on le dérive de
-    # VERSION (--new-tag sans valeur), soit on vérifie que la valeur explicite
-    # colle. Impossible de tagguer v1.4.0 avec VERSION restée à 1.3.x.
+    # Version : source unique (constante VERSION), le tag en est dérivé.
+    # Impossible de tagguer v1.5.0 avec VERSION restée à 1.4.x.
     if args.new_tag:
         want = f"v{read_code_version()}"
         if args.new_tag == "AUTO":
             args.new_tag = want
         elif args.new_tag != want:
             fail(f"--new-tag {args.new_tag} != {want} (constante VERSION dans "
-                 f"{APP_PY}). La version a UNE source : bumpe VERSION, puis "
-                 f"passe --new-tag sans valeur (le tag est dérivé).")
+                 f"{VERSION_FILE}). Bumpe VERSION, puis repasse --new-tag sans "
+                 f"valeur (le tag est dérivé).")
         if not TAG_RELEASE_RE.fullmatch(args.new_tag):
             fail(f"tag de release invalide : {args.new_tag!r} (format attendu vX.Y.Z)")
 
-    # --- Validation ---
-    if args.new_tag and args.skip_push:
-        fail("--new-tag et --skip-push sont contradictoires")
-    if args.new_tag and args.patch_tag:
-        fail("--new-tag et --patch-tag sont contradictoires (rebuild vs patch existant)")
-    if args.dry_run and args.skip_push:
-        fail("--dry-run et --skip-push sont contradictoires")
-    if args.push_only and args.skip_push:
-        fail("--push-only et --skip-push sont contradictoires (pousser sans patcher vs patcher sans pousser)")
-    if args.push_only and args.new_tag:
-        fail("--push-only et --new-tag sont contradictoires (push seul vs rebuild via tag)")
-
-    # --- Mode --skip-push : patch direct, pas de push ni de détection ---
-    if args.skip_push:
-        cprint(f"==> --skip-push : pas de push ni de détection, déclenchement direct ({args.mode}).", "yellow")
-        tag = args.patch_tag or get_latest_tag(args.repo)
-        invoke_patch(args.mode, args.repo, tag)
-        return 0
-
-    # --- Phase 1 : push + détection ---
-    cprint("==> [1/2] Push des sources sur main + détection du diff", "cyan")
     sha_initial = verifier_depot(args.new_tag)
     verifier_fichiers_nouveaux()
-    changed = compute_diff(args.dry_run)
 
-    # Une simulation ne doit rien publier, pas même un tag sur un dépôt sans
-    # changement (l'ancien ordre poussait celui d'un --dry-run --new-tag).
+    if not args.skip_tests and not args.dry_run:
+        preflight()
+
+    changed = compute_diff(args.dry_run)
+    # Une simulation ne doit pas non plus publier de tag sur un dépôt propre.
     if args.dry_run:
         cprint("\n==> --dry-run : pas de commit ni de push.", "yellow")
         return 0
 
     if not changed:
-        # --new-tag sans diff : cas légitime (sources déjà poussées lors d'un
-        # patch précédent, on veut ensuite un vrai rebuild taggé).
         if args.new_tag:
             cprint(f"\n==> Aucun changement à pousser ; tag {args.new_tag} sur le HEAD courant.", "cyan")
             _publier_tag(args.new_tag, sha_initial)
-            cprint(f"\n==> Tag {args.new_tag} poussé → release.yml va se déclencher (rebuild ~30 min sur 3 OS).", "green")
-            print(f"    Suivi : https://github.com/{args.repo}/actions/workflows/release.yml")
-        return 0  # message déjà affiché par compute_diff
+            watch_release(args.new_tag, sha_initial)
+        return 0
 
-    commit_and_push(args.message, args.new_tag)
+    sha_publie = commit_and_push(args.message, args.new_tag)
 
     if args.new_tag:
-        cprint(f"\n==> Nouveau tag {args.new_tag} poussé → release.yml va se déclencher (rebuild ~30 min sur 3 OS).", "green")
-        print(f"    Suivi : https://github.com/{args.repo}/actions/workflows/release.yml")
-        return 0
+        watch_release(args.new_tag, sha_publie)
+    else:
+        cprint("\n==> Poussé sur main (pas de tag -> pas de release).", "green")
 
-    cprint("\n==> Fichiers modifiés et poussés :", "cyan")
-    for c in changed:
-        print(f"    {c}")
-
-    # --- Mode --push-only : sources poussées, on saute le patch des bundles ---
-    if args.push_only:
-        cprint("\n==> --push-only : sources sur main, patch des bundles sauté.", "green")
-        cprint("    Récup : git pull && python gpxsolar.py ...", "cyan")
-        return 0
-
-    # --- Phase 2 : catégorisation -> action ---
-    rebuild = [c for c in changed if is_rebuild_file(c)]
-    # gpxsolar.py OU un fichier du front gui/ : les deux vivent dans _internal/
-    # et sont patchables sans rebuild (update_app.py les remplace tous). Sans le
-    # gui/, une modif d'UI seule aurait juste poussé les sources sans mettre à
-    # jour les bundles (même correctif que le jumeau lidar2map).
-    code_changed = APP_PY in changed or any(c.startswith("gui/") for c in changed)
-
-    if rebuild:
-        cprint("\n==> [2/2] REBUILD requis (fichiers impactant le binaire) :", "yellow")
-        for f in rebuild:
-            cprint(f"      {f}", "yellow")
-        print()
-        print(f"    Le patch (cloud ou local) ne change que _internal/{APP_PY} :")
-        print("    il ne peut PAS livrer ces changements. Il faut un vrai rebuild")
-        print("    via release.yml, déclenché par un NOUVEAU tag (choix de version à toi) :")
-        cur = get_latest_tag(args.repo)
-        print()
-        cprint(f"      python deploy.py -m \"{args.message}\" --new-tag <vX.Y.Z>    # dernière release : {cur}", "cyan")
-        print()
-        cprint("    Sources déjà poussées ; il ne reste qu'à tagger pour lancer release.yml.", "yellow")
-        return 0
-
-    if code_changed:
-        tag = args.patch_tag or get_latest_tag(args.repo)
-        cprint(f"\n==> [2/2] {APP_PY} modifié → patch via --mode {args.mode} sur {tag}", "cyan")
-        cprint("    Avertissement : si tu as touché au BLOC LAUNCHER ou aux DEPS dans", "yellow")
-        cprint(f"    {APP_PY}, le patch ne suffit pas → rebuild via release.yml.", "yellow")
-        invoke_patch(args.mode, args.repo, tag)
-        return 0
-
-    cprint("\n==> [2/2] Docs / meta seulement → aucun binaire à patcher, push suffit. Terminé.", "green")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

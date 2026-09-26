@@ -6,10 +6,6 @@
 #   3. PyInstaller launcher       -> dist/gpxsolar.exe        (launcher léger)
 #      + copie gpxsolar_bundle.zip à côté du .exe
 #
-# Mise à jour sans rebuild :
-#   Ouvrir gpxsolar_bundle.zip -> _internal/ -> remplacer gpxsolar.py
-#   (ou : python update_app.py)
-#
 # Usage :
 #   PowerShell -ExecutionPolicy Bypass -File gpxsolar_win_build.ps1
 
@@ -85,6 +81,3 @@ Write-Host "=== BUILD TERMINE ===" -ForegroundColor Green
 Write-Host "  Livrables :" -ForegroundColor Green
 Write-Host ("    $finalExe  ({0:N1} Mo)" -f $finalSize)
 Write-Host ("    $finalZip  ({0:N1} Mo)" -f $finalZipSize)
-Write-Host ""
-Write-Host "  Mise a jour sans rebuild :" -ForegroundColor Yellow
-Write-Host "    Ouvrir gpxsolar_bundle.zip -> _internal\gpxsolar.py  (ou python update_app.py)"

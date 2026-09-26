@@ -65,7 +65,7 @@ Two ways to use gpxsolar:
 |---|---|---|
 | **Requirements** | Python 3.12 | None |
 | **First install** | ~5 min (deps bootstrap) | None |
-| **Updates** | `git pull` + relaunch | Patch the bundle in one command: `python update_app.py` (or `--release` for all 3 OSes — see [`update_app.py`](update_app.py)) |
+| **Updates** | `git pull` + relaunch | Download the new release and extract it over the previous one |
 | **Distributable** | No — each user installs Python | Yes — `.exe` / `.app` / Linux binary + `gpxsolar_bundle.zip` side by side |
 | **Best for** | dev / Linux / contributing | end user / distributing |
 

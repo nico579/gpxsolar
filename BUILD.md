@@ -1,7 +1,7 @@
 # gpxsolar — Build & déploiement
 
 Documentation technique de l'empaquetage de gpxsolar en exécutable autonome
-(Windows `.exe`, Linux ELF, macOS `.app`) et de la mise à jour sans rebuild.
+(Windows `.exe`, Linux ELF, macOS `.app`) et de la livraison d'une version.
 
 L'architecture est calquée sur celle de lidar2map.
 
@@ -21,7 +21,7 @@ Un même `gpxsolar.py` est buildé en **deux** binaires PyInstaller :
             │
             │ lit, à CÔTÉ de lui (pas embarqué) :
             ▼
-   gpxsolar_bundle.zip   ← le onedir zippé, REMPLAÇABLE sans rebuild
+   gpxsolar_bundle.zip   ← le onedir zippé
 ```
 
 1. **onedir** (`gpxsolar_win.spec` / `gpxsolar_mac.spec`) : la vraie application,
@@ -53,19 +53,19 @@ bundlent PyQt6 (`collect_all`) et excluent winforms/clr/pythonnet ; le venv de
 build doit donc contenir `PyQt6 PyQt6-WebEngine qtpy` (installés par
 `--installer-deps` / `setup_build_*`).
 
-### Pourquoi le bundle est À CÔTÉ et pas embarqué
+### Pourquoi le bundle est à côté et pas embarqué
 
-Le `.zip` séparé est **remplaçable sans rebuild**. Pour livrer un nouveau
-`gpxsolar.py`, on régénère juste l'entrée `_internal/gpxsolar.py` dans le zip —
-aucun PyInstaller, aucune machine de build par OS. C'est ce qu'automatise
-[`update_app.py`](update_app.py).
+Le `.zip` séparé servait au patch sans reconstruction (`update_app.py`,
+`update.yml`), retiré le 26 septembre 2026 comme sur lidar2map : depuis,
+toute livraison passe par une release reconstruite (section 4).
 
 ### Le rôle de `_loader.py`
 
 L'entry point PyInstaller du onedir est `_loader.py` (et **non** `gpxsolar.py`).
 `_loader.py` ne change jamais : il se contente d'exécuter `_internal/gpxsolar.py`
 via `runpy.run_path`. `gpxsolar.py` est donc livré **en clair** dans le bundle
-(`_internal/gpxsolar.py`), ce qui le rend éditable/remplaçable.
+(`_internal/gpxsolar.py`). C'était le support du patch sans reconstruction ;
+le mécanisme reste en place, sans autre usage.
 
 Le onedir est buildé en **2 passes Analysis** :
 - Passe 1 : analyse `gpxsolar.py` pour détecter ses imports (sqlite3, ssl, xml…).
@@ -91,11 +91,9 @@ Le onedir est buildé en **2 passes Analysis** :
 | `gpxsolar_mac_launcher.spec` | Spec launcher macOS (`.app`) |
 | `gpxsolar_mac_build.sh` | Build macOS (4 étapes) |
 | `setup_build_mac.sh` | Prépare la machine macOS |
-| `update_app.py` | Patch du bundle (local / archive mac / release 3 OS) |
-| `deploy.py` | **Déploiement unifié en 1 commande** (cross-platform Win/Mac/Linux) : push, détection du diff, patch cloud/local ou tag pour rebuild |
+| `deploy.py` | **Déploiement unifié en 1 commande** (cross-platform Win/Mac/Linux) : tests, commit et push depuis ce dépôt, puis tag et suivi du build de release |
 | `.github/workflows/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
 | `.github/workflows/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
-| `.github/workflows/update.yml` | **Update** : patche le code des 3 bundles d'une release, sans rebuild (manuel) |
 
 Le venv de build est `~/.gpxsolar/venv` sur les 3 OS, créé par le setup via
 `gpxsolar.py --installer-deps` (qui installe toutes les deps puis quitte sans
@@ -133,123 +131,52 @@ Le `.app` n'est pas signé → Gatekeeper bloque au 1er lancement. Contourner :
 
 ---
 
-## 4. Mise à jour sans rebuild
+## 4. Livrer une version
 
-Le bundle `_internal/gpxsolar.py` est un fichier texte. Pour livrer une nouvelle
-version sans repasser par PyInstaller :
+Toute livraison passe par une **release reconstruite** : `release.yml`
+construit les 4 archives (Windows, Linux, macOS Apple Silicon et Intel) sur
+des runners neufs, puis publie. Le patch d'un bundle existant sans
+reconstruction (`update_app.py`, `update.yml`) a été retiré le 26 septembre
+2026, comme sur lidar2map en 1.53. Il ne livrait que `gpxsolar.py` et `gui/`,
+jamais un module `_*.py`, une dépendance ou une spec ; et sous macOS, il
+modifiait l'intérieur de `GPXSOLAR.app` depuis un runner Ubuntu, sans pouvoir
+le re-signer, ce qui rompt le sceau de sa signature (c'est ce qui valait
+« LIDAR2MAP.app is damaged » à lidar2map en juillet 2026).
 
-**Manuel** : ouvrir `gpxsolar_bundle.zip` → `_internal/` → remplacer `gpxsolar.py`.
+Côté utilisateur, il suffit de décompresser la nouvelle archive par-dessus
+l'ancienne.
 
-**Automatique** ([`update_app.py`](update_app.py)) :
+### Déploiement en une commande : `deploy.py`
 
-```bash
-# 1. Bundle local (à côté du script ou dans dist/)
-python update_app.py
-
-# 2. Archive macOS (depuis n'importe quel OS — préserve les permissions Unix)
-python update_app.py gpxsolar-macos-arm64.zip
-
-# 3. Release GitHub complète (Win + Linux + macOS) en une commande
-python update_app.py --release --tag v1.0.0
-python update_app.py --release --tag v1.0.0 --dry-run   # simulation
-```
-
-Le mode `--release` télécharge les 3 assets de la release, patche le bundle
-interne de chacun, corrige au passage le bit exécutable du launcher Linux,
-réuploade (DELETE + UPLOAD car GitHub n'accepte pas de PATCH binaire), puis met
-à jour les SHA256 dans le corps de la release. Requiert un token GitHub
-(`GH_TOKEN`, `GITHUB_TOKEN` ou `git credential`).
-
-Au prochain lancement, le launcher détecte le SHA différent et ré-extrait le
-bundle automatiquement.
-
-### Compiler (build) vs mettre à jour (patch) — quelle méthode ?
-
-Deux opérations **distinctes**, à ne pas confondre :
-
-| Opération | OS-spécifique ? | Depuis 1 seule machine ? |
-|---|---|---|
-| **Compiler** (PyInstaller : launcher + onedir avec libs natives) | Oui — `.exe` / ELF / `.app` + rasterio/Qt compilés | Non : chaque OS, ou le cloud |
-| **Mettre à jour** `_internal/gpxsolar.py` d'un bundle existant | Non — simple manip de zip | **Oui, pour les 3 OS** |
-
-C'est tout l'intérêt du bundle séparé du launcher : une fois les 3 binaires
-compilés (une fois), **une seule machine met à jour les 3 OS** sans recompiler,
-via `update_app.py --release`.
-
-**Ce que `update_app.py` peut / ne peut PAS patcher :**
-
-- ✅ **Sans rebuild** (vit dans `_internal/gpxsolar.py`, l'app *inner*) : `main`,
-  `show_form`, la logique de calcul, les handlers GUI.
-- ❌ **Rebuild obligatoire** : une **dépendance** (libs natives), un **spec**, le
-  **bloc launcher** (recherche bundle / extraction / **lockfile**) — compilé *dans*
-  l'exe launcher, pas dans le bundle —, la version de Python, un nouvel OS.
-  > Exemple vécu : le durcissement du lockfile (bloc launcher) a exigé un rebuild ;
-  > le muzzle Qt et le clamp fenêtre (dans `show_form`) auraient pu passer par
-  > `update_app.py`.
-
-**Trois méthodes de livraison — laquelle choisir :**
-
-| Méthode | Compile ? | Upload ~1,5 Go depuis | Pour |
-|---|---|---|---|
-| ☁️ **`release.yml`** (tag `v*`) | oui (3 OS, clean-room) | réseau GitHub | deps / spec / **bloc launcher** / nouvelle version |
-| ☁️ **`update.yml`** (manuel + tag) | non | réseau GitHub | **fix de code seul (recommandé)** |
-| ⚡ **`update_app.py --release`** (local) | non | **ta** connexion | fix de code hors cloud |
-| 🔧 **build local par-OS** (`*_build.*`) | oui (1 OS) | — | itérer / déboguer |
-
-Détails :
-- ☁️ **`release.yml`** — **source de vérité des binaires distribués** : runner neuf,
-  reproductible (pas de dérive machine — ex. mauvaise version de dépendance). Seul
-  moyen d'obtenir Linux/macOS sans posséder la machine. Déclenché par un tag `vX.Y.Z`.
-- ☁️ **`update.yml`** — fait tourner `update_app.py --release` **sur un runner** :
-  download + patch + ré-upload des ~1,5 Go d'assets se font sur le **réseau GitHub**,
-  pas sur ta liaison montante. **La voie idéale pour livrer un fix de code.**
-- ⚡ **`update_app.py --release` en local** — même résultat, mais re-pousse ~1,5 Go
-  depuis **ta** connexion (DELETE+UPLOAD des assets entiers — GitHub ne patche pas
-  partiellement) ; sur upload lent c'est plus long que le cloud. À réserver au cas
-  hors-ligne / sans accès au repo.
-- 🔧 **Build local** — ne jamais publier un build local comme asset (dérive machine
-  + 1 seul OS) ; sert uniquement à tester sur ta plateforme.
-
-**Règle** : pour livrer, **rester dans le cloud** — `release.yml` si deps/spec/
-launcher changent, sinon `update.yml` (fix de code, sans rebuild ni upload local).
-Le build local n'est que pour itérer/déboguer.
-
-### Déploiement unifié en une commande — `deploy.py`
-
-Un seul script (cross-platform : Windows / macOS / Linux) qui **détecte ce qui
-a changé** et applique la bonne action, sur la voie de ton choix :
+Ce dossier de travail est le dépôt GitHub lui-même. `deploy.py` y lance les
+tests hors réseau de la CI (`test_gpxsolar.py`, `test_dossiers.py`) et
+`ruff`, commit, pousse sur `main` et, avec `--new-tag`, pose le tag
+`v<VERSION>` qui déclenche `release.yml`, dont il suit le build.
 
 ```bash
-python deploy.py -m "mon correctif"                         # cloud, dernière release
-python deploy.py -m "..." --patch-tag v1.0.2                # cibler un tag existant
-python deploy.py -m "..." --mode local                      # patch local au lieu de cloud
-python deploy.py -m "..." --new-tag v1.0.3                  # créer un NOUVEAU tag -> release.yml
-python deploy.py -m "..." --skip-push                       # patch direct, sans push ni détection
-python deploy.py -m "..." --dry-run                         # voir le diff sans pousser
+python deploy.py -m "mon correctif"            # tests + push, pas de release
+python deploy.py -m "..." --new-tag            # tests + push + tag v<VERSION> + suivi du build
+python deploy.py -m "..." --dry-run            # voir le diff sans rien pousser
 ```
 
-Sous Mac/Linux : `python3 deploy.py ...` ou `./deploy.py ...` (le script a un
-shebang `#!/usr/bin/env python3`, faire `chmod +x deploy.py` la 1ère fois).
+- La version a une **source unique**, la constante `VERSION` de
+  `gpxsolar.py` : `--new-tag` en dérive le tag et refuse toute autre valeur.
+- `deploy.py` refuse de partir si la branche n'est pas `main`, si `origin`
+  n'est pas le dépôt officiel ou si `HEAD` diffère de `origin/main` (commit
+  poussé ailleurs, par exemple une PR fusionnée : `git pull` d'abord).
+- Seuls les fichiers déjà suivis partent. Un fichier nouveau non ignoré bloque
+  le déploiement : l'ajouter (`git add`) ou l'ignorer (`.gitignore`, ou
+  `.git/info/exclude` pour un fichier personnel).
 
-| `--mode` | Voie | Qui upload les ~1,5 Go ? | Prérequis |
-|---|---|---|---|
-| `cloud` (défaut) | `update.yml` sur runner GitHub | **GitHub** | `gh auth status` |
-| `local` | `python update_app.py --release` ici | **ta connexion** | `python` + `GH_TOKEN`/`GITHUB_TOKEN` (ou `gh auth token`) |
+Sous Mac/Linux : `python3 deploy.py ...` ou `./deploy.py ...` (shebang
+`#!/usr/bin/env python3`, `chmod +x deploy.py` la première fois).
 
-| Ce qui a changé (diff réel) | Action automatique (identique cloud / local) |
-|---|---|
-| `gpxsolar.py` seul (code interne) | push **+ patch** (cloud ou local selon `--mode`) sur la dernière release |
-| `.spec` / `_loader.py` / `*_build.*` / `setup_build_*` | push **puis STOP** : indique de relancer avec `--new-tag` (rebuild ; version = choix humain) |
-| docs / meta seules (README, BUILD, workflows, LICENSE, screenshots) | **push seul** — aucun binaire à toucher |
+### Build local
 
-**Deux sémantiques de tag distinctes** :
-- `--patch-tag vX.Y.Z` = cibler une release **existante** pour le patch (défaut : la dernière).
-- `--new-tag vX.Y.Z` = créer un **nouveau** tag git → déclenche `release.yml` (rebuild complet 3 OS, ~30 min).
-
-> ⚠️ **Angle mort** assumé : le bloc launcher et les dépendances vivent *dans*
-> `gpxsolar.py`. Si seul `gpxsolar.py` change, le script suppose un fix de code
-> interne (→ patch) et **affiche un avertissement** : si tu as touché au
-> bloc launcher ou aux deps, relance avec `--new-tag <vX.Y.Z>` pour un rebuild.
+Les scripts `gpxsolar_*_build.*` servent à itérer et déboguer sur sa propre
+plateforme. Ne jamais publier un build local comme asset : dérive de la
+machine (versions des dépendances) et un seul OS. `release.yml` reste la
+source de vérité des binaires distribués.
 
 ---
 

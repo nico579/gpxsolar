@@ -10,9 +10,6 @@
 #   3. PyInstaller launcher     -> dist/gpxsolar            (launcher léger)
 #      + copie gpxsolar_bundle.zip à côté du binaire
 #
-# Mise à jour sans rebuild :
-#   Ouvrir gpxsolar_bundle.zip -> _internal/ -> remplacer gpxsolar.py
-#
 # Usage :
 #   bash gpxsolar_linux_build.sh
 
@@ -90,6 +87,3 @@ echo -e "${G}=== BUILD TERMINE ===${N}"
 echo -e "${G}  Livrables :${N}"
 echo "    $FINAL_BIN  (${final_size} Mo)"
 echo "    $FINAL_ZIP  (${final_zip_size} Mo)"
-echo ""
-echo -e "${Y}  Mise a jour sans rebuild :${N}"
-echo "    Ouvrir gpxsolar_bundle.zip -> _internal/gpxsolar.py  (ou python update_app.py)"

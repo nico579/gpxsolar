@@ -9,7 +9,7 @@ Usage :
 Résultat :
     dist_onedir/gpxsolar/gpxsolar(.exe)
     dist_onedir/gpxsolar/_internal/
-        gpxsolar.py          (livré EN CLAIR → maj sans rebuild via update_app.py)
+        gpxsolar.py          (livré en clair, exécuté par _loader.py)
         pyproj/, rasterio/, ...
 
 Architecture (miroir lidar2map) :
@@ -260,7 +260,7 @@ a = Analysis(
     datas=datas + [("gpxsolar.py", "."),     # gpxsolar.py en clair dans _internal/
                    ("gui/index.html", "gui"), # front séparé (comme lidar2map),
                    ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
-                   ("gui/app.js", "gui")],    # patchable sans rebuild via update_app
+                   ("gui/app.js", "gui")],    # livré tel quel
 
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=_runtime_hooks, excludes=_excludes, noarchive=False, optimize=0,

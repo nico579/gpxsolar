@@ -8,7 +8,7 @@ name: Release (build 3 OS)
 #   - push d'un tag v*           (ex: git tag v1.0.0 && git push origin v1.0.0)
 #   - manuel (workflow_dispatch) avec saisie du tag
 #
-# Assets produits (noms attendus par update_app.py) :
+# Assets produits :
 #   gpxsolar-windows-x86_64.zip     (dossier : gpxsolar.exe + gpxsolar_bundle.zip)
 #   gpxsolar-linux-x86_64.tar.gz    (dossier : gpxsolar    + gpxsolar_bundle.zip)
 #   gpxsolar-macos-arm64.zip        (GPXSOLAR.app zippé via ditto, Apple Silicon)
@@ -154,7 +154,7 @@ jobs:
           set -euo pipefail
           # Collecter les assets (zip/tar.gz) et leurs SHA256
           ASSETS=()
-          BODY=$'## gpxsolar '"$TAG"$'\n\nExécutables autonomes (Python + dépendances embarqués, aucune installation).\n\nPremier lancement : extraction locale (~5-10 s). Mise à jour du script sans rebuild via `update_app.py`.\n\n| Fichier | SHA256 |\n|---|---|\n'
+          BODY=$'## gpxsolar '"$TAG"$'\n\nExécutables autonomes (Python + dépendances embarqués, aucune installation).\n\nPremier lancement : extraction locale (~5-10 s). Mise à jour : décompresser cette archive par-dessus la précédente.\n\n| Fichier | SHA256 |\n|---|---|\n'
           while IFS= read -r sha; do
             asset="${sha%.sha256}"
             name="$(basename "$asset")"

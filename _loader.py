@@ -3,13 +3,10 @@
 # Ce fichier est compilé dans le binaire PyInstaller et NE CHANGE JAMAIS.
 # Il se contente de trouver gpxsolar.py dans _internal/ et de l'exécuter.
 #
-# Avantage : gpxsolar.py est stocké comme fichier texte dans le bundle.
-# Pour mettre à jour le script sans rebuild (et sans accès à la machine
-# de build) :
-#   1. Ouvrir gpxsolar_bundle.zip (à côté de l'exe / dans Contents/Resources/)
-#   2. Naviguer dans _internal/
-#   3. Remplacer gpxsolar.py
-#   C'est tout — aucun rebuild. Cf. update_app.py qui automatise ça.
+# gpxsolar.py est ainsi livré comme fichier texte dans _internal/. C'était le
+# support du patch sans reconstruction (update_app.py), retiré le 26 septembre
+# 2026 comme sur lidar2map : toute livraison passe désormais par une release
+# reconstruite. Le mécanisme reste en place, sans autre usage.
 
 import sys
 import runpy

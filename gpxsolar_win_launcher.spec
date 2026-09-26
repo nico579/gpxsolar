@@ -6,8 +6,7 @@ Construit la même source gpxsolar.py en mode onefile minimal, en excluant
 toutes les deps lourdes (le launcher n'utilise que stdlib).
 
 Le bundle gpxsolar_bundle.zip N'EST PAS embarqué dans le binaire : il est
-copié à côté du .exe par gpxsolar_win_build.ps1, ce qui le rend remplaçable
-sans rebuilder (cf. update_app.py).
+copié à côté du .exe par gpxsolar_win_build.ps1.
 
 Au runtime, le bloc launcher en tête de gpxsolar.py cherche le bundle à côté
 de l'exe, l'extrait dans %LOCALAPPDATA%\\gpxsolar (avec contrôle SHA), puis

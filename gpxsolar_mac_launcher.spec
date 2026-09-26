@@ -6,8 +6,7 @@ Construit la même source gpxsolar.py en mode onefile minimal, en excluant
 toutes les deps lourdes (le launcher n'utilise que stdlib).
 
 Le bundle gpxsolar_bundle.zip N'EST PAS embarqué dans le binaire : il est
-copié dans GPXSOLAR.app/Contents/Resources/ par gpxsolar_mac_build.sh, ce qui
-le rend remplaçable sans rebuilder (cf. update_app.py).
+copié dans GPXSOLAR.app/Contents/Resources/ par gpxsolar_mac_build.sh.
 
 Au runtime, le bloc launcher en tête de gpxsolar.py cherche le bundle dans
 Contents/Resources/, l'extrait dans ~/Library/Application Support/gpxsolar/,

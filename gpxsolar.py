@@ -75,8 +75,7 @@ if getattr(sys, "frozen", False):
         _sys = platform.system()
 
         # Ordre de recherche du bundle (archi lidar2map) :
-        #   1. À côté de l'exe / dans Contents/Resources/ (bundle fichier séparé,
-        #      remplaçable sans rebuild via update_app.py)
+        #   1. À côté de l'exe / dans Contents/Resources/ (bundle fichier séparé)
         #   2. Dans sys._MEIPASS (bundle embarqué — fallback ancienne archi)
         if _sys == "Darwin" and ".app" in str(_exe):
             _bundle = _exe.parent.parent / "Resources" / "gpxsolar_bundle.zip"
