@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """deploy.py — Déploiement unifié gpxsolar (cross-platform Windows/macOS/Linux).
 
+Ce dossier de travail EST le dépôt git depuis le 26 septembre 2026 : deploy.py
+commit et pousse directement ici, sur le modèle de lidar2map. Plus de clone
+temporaire ni de table de correspondance de noms : README.md, BUILD.md et
+.github/workflows/ portent ici leur vrai nom. Seuls les fichiers déjà suivis
+partent (git add -u) : un fichier nouveau non ignoré bloque le déploiement
+tant qu'il n'a pas été ajouté (git add) ou ignoré (.gitignore pour tous,
+.git/info/exclude pour soi seul), ce dossier accumulant traces, caches et
+sauvegardes personnels qu'un git add -A publierait.
+
 Un seul script pour tout :
   • push des sources vers le repo GitHub
   • détection automatique de ce qui a changé
@@ -34,11 +43,10 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
-import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 from typing import NoReturn
 
@@ -58,65 +66,9 @@ APP_PY = "gpxsolar.py"
 REPO_DEFAULT = "nico579/gpxsolar"
 
 SRC = Path(__file__).resolve().parent
-CLONE = Path(tempfile.gettempdir()) / f"{PROJECT}_gh"
-REPO_URL = f"https://github.com/{REPO_DEFAULT}"
-
-# Mapping fichier local -> chemin dans le repo GitHub
-MAP = {
-    # Source
-    "gpxsolar.py":                  "gpxsolar.py",
-    "test_gpxsolar.py":             "test_gpxsolar.py",
-    # Smoke réseau (cron hebdo via smoke.yml, jamais sur push).
-    "smoke_gpxsolar.py":            "smoke_gpxsolar.py",
-    # Trace témoin du run de validation manuel (BUILD.md §7)
-    "2026-05-16_13-31.gpx":         "2026-05-16_13-31.gpx",
-    "_loader.py":                   "_loader.py",
-    "update_app.py":                "update_app.py",
-    "deploy.py":                    "deploy.py",
-    # Build Windows / Linux
-    "gpxsolar_win.spec":            "gpxsolar_win.spec",
-    "gpxsolar_win_launcher.spec":   "gpxsolar_win_launcher.spec",
-    "gpxsolar_win_build.ps1":       "gpxsolar_win_build.ps1",
-    "setup_build_windows.ps1":      "setup_build_windows.ps1",
-    "setup_build_linux.sh":         "setup_build_linux.sh",
-    "gpxsolar_linux_build.sh":      "gpxsolar_linux_build.sh",
-    # Build macOS
-    "gpxsolar_mac.spec":            "gpxsolar_mac.spec",
-    "gpxsolar_mac_launcher.spec":   "gpxsolar_mac_launcher.spec",
-    "gpxsolar_mac_build.sh":        "gpxsolar_mac_build.sh",
-    "setup_build_mac.sh":           "setup_build_mac.sh",
-    # Doc + CI + meta
-    "README_Github.md":             "README.md",
-    "README_Github.fr.md":          "README.fr.md",
-    "README_GPXSOLAR.md":           "BUILD.md",
-    "ci_github.yml":                ".github/workflows/ci.yml",
-    "release_github.yml":           ".github/workflows/release.yml",
-    "update_github.yml":            ".github/workflows/update.yml",
-    "cross_platform_github.yml":    ".github/workflows/cross_platform.yml",
-    "smoke_github.yml":             ".github/workflows/smoke.yml",
-    # Config ruff : le job lint du CI en dépend (sans elle, ruff appliquerait
-    # ses règles par défaut E+F et échouerait sur le style établi du code).
-    "pyproject.toml":               "pyproject.toml",
-    "LICENSE":                      "LICENSE",
-    ".gitignore":                   ".gitignore",
-    ".gitattributes":               ".gitattributes",
-}
-
-# Dossiers à synchroniser récursivement (mirror local -> remote)
-# gui/ = front séparé (index.html + style.css + app.js), bundlé dans _internal/gui/
-# et patchable sans rebuild (cf. update_app.py qui remplace aussi gui/* dans les
-# bundles). screenshots/ = assets README (non bundlés).
-FOLDERS = {"screenshots": "screenshots", "gui": "gui"}
-
-# Anciens chemins sur GitHub à supprimer (renommages + scripts PS1 obsolètes)
-REMOVE = [
-    "gpxsolar.spec",
-    "gpxsolar_launcher.spec",
-    "gpxsolar_build.ps1",
-    "push_github.ps1",       # remplacé par deploy.py
-    "deploy_update.ps1",     # remplacé par deploy.py
-    "TEST_LINUX_MAC.md",     # contenu utile fondu dans BUILD.md (section Dépannage)
-]
+BRANCHE_RELEASE = "main"
+SHA_GIT_RE = re.compile(r"^[0-9a-f]{40}$")
+TAG_RELEASE_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 # Patterns "rebuild requis" : si l'un de ces fichiers a changé, le patch ne
 # suffit pas (l'archive launcher PyInstaller ou la spec ne sont pas patchables).
@@ -169,7 +121,7 @@ def run(cmd, cwd=None, check=True, capture=False, env=None, timeout=120):
     try:
         result = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None,
-            check=False, text=True,
+            check=False, text=True, encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
             env=env,
@@ -184,8 +136,8 @@ def run(cmd, cwd=None, check=True, capture=False, env=None, timeout=120):
     return result
 
 def git(*args, check=True, capture=False):
-    """git -C <CLONE> <args>"""
-    return run(["git", "-C", str(CLONE), *args], check=check, capture=capture)
+    """git <args>, dans le dossier de travail (qui est le dépôt)."""
+    return run(["git", *args], cwd=SRC, check=check, capture=capture)
 
 def gh_json(*args):
     """gh ... --json X (renvoie le JSON parsé)."""
@@ -224,122 +176,141 @@ def find_python() -> str:
 
 # === PUSH PHASE ==============================================================
 
-def rmtree_force(path, ignore_errors: bool = False):
-    """shutil.rmtree qui survit aux fichiers en lecture seule.
+def _sortie_git(*args) -> str:
+    return git(*args, capture=True).stdout.strip()
 
-    git marque ses objets (.git/objects/**) en lecture seule. Sous Windows,
-    os.unlink refuse alors de les supprimer et rmtree remonte un
-    PermissionError [WinError 5] — vécu en supprimant un clone temp corrompu.
-    Le handler retire le flag puis retente. Sous POSIX il ne sert jamais :
-    c'est le droit d'écriture du DOSSIER qui gouverne la suppression, pas
-    celui du fichier.
-    """
-    def _retry(func, p, _exc):
-        try:
-            os.chmod(p, stat.S_IWRITE)
-            func(p)
-        except OSError:
-            if not ignore_errors:
-                raise
-    # onexc remplace onerror depuis Python 3.12 (onerror déprécié).
-    kw = {"onexc": _retry} if sys.version_info >= (3, 12) else {"onerror": _retry}
+def _remote_officiel(url: str) -> bool:
+    """Reconnaît uniquement le dépôt GitHub attendu, sans alias ni userinfo.
+
+    Le suffixe .git est facultatif en https : actions/checkout pose l'URL sans
+    lui (workflow « deploy.py cross-platform »)."""
+    url = str(url or "").strip()
+    if url == f"git@github.com:{REPO_DEFAULT}.git":
+        return True
     try:
-        shutil.rmtree(path, **kw)
-    except OSError:
-        if not ignore_errors:
-            raise
+        parsed = urllib.parse.urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    propre = (parsed.password is None and not parsed.params
+              and not parsed.query and not parsed.fragment)
+    if parsed.scheme == "https":
+        return (propre and parsed.hostname == "github.com"
+                and parsed.username is None and port is None
+                and parsed.path in (f"/{REPO_DEFAULT}", f"/{REPO_DEFAULT}.git"))
+    if parsed.scheme == "ssh":
+        return (propre and parsed.hostname == "github.com"
+                and parsed.username == "git" and port in (None, 22)
+                and parsed.path == f"/{REPO_DEFAULT}.git")
+    return False
 
-def clone_or_pull():
-    if (CLONE / ".git").exists():
-        cprint(f"==> Pull du repo existant : {CLONE}", "cyan")
-        # fetch non-fatal : le clone temp peut être corrompu (nettoyage
-        # périodique de %TEMP% par Windows, copie interrompue, .git tronqué).
-        # Dans ce cas on supprime et on re-clone au lieu d'échouer sec.
-        r = git("fetch", "origin", check=False, capture=True)
-        if r.returncode == 0:
-            git("reset", "--hard", "origin/main")
-            git("clean", "-fd")
-            return
-        cprint(f"    Clone temp corrompu (fetch code {r.returncode}) — "
-               f"suppression + re-clone.", "yellow")
-        rmtree_force(CLONE, ignore_errors=True)
-    cprint(f"==> Clone {REPO_URL} -> {CLONE}", "cyan")
-    if CLONE.exists():
-        rmtree_force(CLONE)
-    # Clone initial : peut prendre 1-2 min (assets binaires, screenshots).
-    run(["git", "clone", REPO_URL, str(CLONE)], timeout=300)
+def _sha_git(valeur: str, contexte: str) -> str:
+    valeur = str(valeur or "").strip().lower()
+    if not SHA_GIT_RE.fullmatch(valeur):
+        fail(f"SHA Git invalide pour {contexte} : {valeur!r}")
+    return valeur
 
-def remove_obsolete():
-    cprint("\n==> Suppression des anciens chemins renommés", "cyan")
-    for f in REMOVE:
-        p = CLONE / f
-        if p.exists():
-            p.unlink()
-            print(f"    SUPPR {f}")
+def _sha_remote(ref: str, obligatoire: bool = True) -> str:
+    """Lit une référence distante sans modifier le dépôt ni ses refs locales."""
+    resultat = git("ls-remote", "--exit-code", "origin", ref,
+                   check=False, capture=True)
+    if resultat.returncode == 2 and not obligatoire:
+        return ""
+    if resultat.returncode != 0:
+        detail = (resultat.stderr or resultat.stdout or "").strip()
+        fail(f"impossible de lire {ref} sur origin" + (f"\n{detail}" if detail else ""))
+    lignes = [ligne.split() for ligne in resultat.stdout.splitlines() if ligne.strip()]
+    if len(lignes) != 1 or len(lignes[0]) != 2 or lignes[0][1] != ref:
+        fail(f"réponse ambiguë de origin pour {ref}")
+    return _sha_git(lignes[0][0], ref)
 
-def copy_files():
-    cprint("\n==> Copie des fichiers source", "cyan")
-    for src_name, dst_name in MAP.items():
-        s = SRC / src_name
-        d = CLONE / dst_name
-        if s.exists():
-            d.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(s, d)
-            print(f"    OK  {src_name:<32} -> {dst_name}")
-        else:
-            cprint(f"    -- {src_name:<32} (introuvable, ignoré)", "yellow")
+def verifier_depot(new_tag: str = "") -> str:
+    """Refuse de déployer depuis une branche, un remote ou un HEAD inattendu.
 
-def mirror_folders():
-    cprint("\n==> Copie des dossiers (mirror)", "cyan")
-    # Exclure les artefacts Python : __pycache__/, .pyc, .pyo. Sans ça,
-    # copytree copierait le bytecode au temp clone et seul le .gitignore
-    # empêcherait le commit — fragile si la règle change.
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
-    def _is_artefact(p): return "__pycache__" in p.parts or p.suffix in (".pyc", ".pyo")
-    for src_name, dst_name in FOLDERS.items():
-        s = SRC / src_name
-        d = CLONE / dst_name
-        if s.exists():
-            if d.exists():
-                rmtree_force(d)
-            shutil.copytree(s, d, ignore=ignore)
-            count = sum(1 for p in s.rglob("*") if p.is_file() and not _is_artefact(p))
-            print(f"    OK  {src_name:<32} -> {dst_name}  ({count} fichiers)")
-        else:
-            cprint(f"    -- {src_name:<32} (introuvable, ignoré)", "yellow")
+    HEAD doit égaler origin/main : un commit poussé ailleurs (session cloud,
+    PR fusionnée, modification faite sur GitHub) se récupère par git pull
+    avant de déployer. L'ancien déploiement par copie vers un clone
+    temporaire l'écrasait sans le voir."""
+    branche = _sortie_git("branch", "--show-current")
+    if branche != BRANCHE_RELEASE:
+        fail(f"branche courante {branche or '(HEAD détaché)'} ; "
+             f"le déploiement exige {BRANCHE_RELEASE}.")
 
-def compute_diff():
+    fetch_url = _sortie_git("remote", "get-url", "origin")
+    push_url = _sortie_git("remote", "get-url", "--push", "origin")
+    if not _remote_officiel(fetch_url) or not _remote_officiel(push_url):
+        fail(f"origin doit pointer en lecture et écriture vers le dépôt officiel "
+             f"github.com/{REPO_DEFAULT}.\nfetch={fetch_url!r}\npush={push_url!r}")
+
+    local = _sha_git(_sortie_git("rev-parse", "HEAD"), "HEAD local")
+    distant = _sha_remote(f"refs/heads/{BRANCHE_RELEASE}")
+    if local != distant:
+        fail(f"HEAD local ({local}) ne correspond pas exactement à "
+             f"origin/{BRANCHE_RELEASE} ({distant}). Récupère les commits "
+             "distants (git pull) avant de déployer.")
+
+    if new_tag:
+        existe_localement = git("show-ref", "--verify", "--quiet",
+                                f"refs/tags/{new_tag}", check=False)
+        if existe_localement.returncode == 0:
+            fail(f"le tag {new_tag} existe déjà localement")
+        if existe_localement.returncode not in (0, 1):
+            fail(f"impossible de vérifier le tag local {new_tag}")
+        if _sha_remote(f"refs/tags/{new_tag}", obligatoire=False):
+            fail(f"le tag {new_tag} existe déjà sur origin")
+    return local
+
+def verifier_fichiers_nouveaux() -> None:
+    """Bloque sur tout fichier nouveau ni suivi ni ignoré (voir le docstring
+    du module) : l'ajouter ou l'ignorer est un choix explicite."""
+    nouveaux = _sortie_git("ls-files", "--others", "--exclude-standard").splitlines()
+    if nouveaux:
+        fail("fichiers nouveaux ni suivis ni ignorés :\n  "
+             + "\n  ".join(nouveaux)
+             + "\nAjoute-les (git add) ou ignore-les (.gitignore pour tous, "
+               ".git/info/exclude pour toi seul), puis relance.")
+
+def compute_diff(dry_run: bool = False) -> list:
     cprint("\n==> Modifications :", "cyan")
-    git("add", "-A")
-    status = git("status", "--short", capture=True).stdout.strip()
+    # Un dry-run doit être parfaitement observateur : même ``git add`` est une
+    # mutation de l'index et peut écraser la sélection de l'utilisateur.
+    if not dry_run:
+        git("add", "-u")
+    status = git("status", "--short", "--untracked-files=no", capture=True).stdout.strip()
     if not status:
         cprint("    Aucun changement. Rien à pousser.", "yellow")
         return []
     for line in status.splitlines():
         print(f"    {line}")
     print()
+    if dry_run:
+        git("diff", "--stat")
+        git("diff", "--cached", "--stat")
+        return status.splitlines()
     git("diff", "--cached", "--stat")
-    changed = git("diff", "--cached", "--name-only", capture=True).stdout.strip().splitlines()
+    changed = _sortie_git("diff", "--cached", "--name-only").splitlines()
     return [c.strip() for c in changed if c.strip()]
 
-def commit_and_push(message: str, new_tag: str = ""):
+def _publier_tag(tag: str, sha: str) -> None:
+    cprint(f"\n==> Tag {tag}", "cyan")
+    git("tag", "-a", tag, "-m", f"{PROJECT} {tag}", sha)
+    git("push", "origin", f"refs/tags/{tag}:refs/tags/{tag}")
+    distant = _sha_remote(f"refs/tags/{tag}^{{}}")
+    if distant != sha:
+        fail(f"le tag distant {tag} pointe vers {distant}, attendu {sha}")
+
+def commit_and_push(message: str, new_tag: str = "") -> str:
     cprint("\n==> Commit", "cyan")
-    msg_file = CLONE / "COMMIT_MSG.txt"
-    # UTF-8 SANS BOM par défaut sur Python.
-    msg_file.write_text(message, encoding="utf-8")
-    try:
-        git("commit", "-F", str(msg_file))
-    finally:
-        try:
-            msg_file.unlink()
-        except FileNotFoundError:
-            pass
+    git("commit", "-m", message)
+    sha = _sha_git(_sortie_git("rev-parse", "HEAD"), "commit créé")
     cprint("\n==> Push origin main", "cyan")
-    git("push", "origin", "main")
+    git("push", "origin", f"HEAD:refs/heads/{BRANCHE_RELEASE}")
+    distant = _sha_remote(f"refs/heads/{BRANCHE_RELEASE}")
+    if distant != sha:
+        fail(f"origin/{BRANCHE_RELEASE} pointe vers {distant}, attendu {sha}")
     if new_tag:
-        cprint(f"\n==> Tag {new_tag}", "cyan")
-        git("tag", "-a", new_tag, "-m", message)
-        git("push", "origin", new_tag)
+        _publier_tag(new_tag, sha)
+    return sha
 
 # === RELEASE PHASE (patch d'une release existante) ===========================
 
@@ -445,6 +416,8 @@ def main():
             fail(f"--new-tag {args.new_tag} != {want} (constante VERSION dans "
                  f"{APP_PY}). La version a UNE source : bumpe VERSION, puis "
                  f"passe --new-tag sans valeur (le tag est dérivé).")
+        if not TAG_RELEASE_RE.fullmatch(args.new_tag):
+            fail(f"tag de release invalide : {args.new_tag!r} (format attendu vX.Y.Z)")
 
     # --- Validation ---
     if args.new_tag and args.skip_push:
@@ -467,27 +440,25 @@ def main():
 
     # --- Phase 1 : push + détection ---
     cprint("==> [1/2] Push des sources sur main + détection du diff", "cyan")
-    clone_or_pull()
-    remove_obsolete()
-    copy_files()
-    mirror_folders()
-    changed = compute_diff()
+    sha_initial = verifier_depot(args.new_tag)
+    verifier_fichiers_nouveaux()
+    changed = compute_diff(args.dry_run)
 
-    if not changed:
-        # --new-tag sans diff : cas légitime (sources déjà poussées lors d'un
-        # patch précédent, on veut ensuite un vrai rebuild taggé). L'ancien
-        # early return court-circuitait la création du tag.
-        if args.new_tag:
-            cprint(f"\n==> Aucun changement à pousser ; tag {args.new_tag} sur le HEAD courant.", "cyan")
-            git("tag", "-a", args.new_tag, "-m", args.message)
-            git("push", "origin", args.new_tag)
-            cprint(f"\n==> Tag {args.new_tag} poussé → release.yml va se déclencher (rebuild ~30 min sur 3 OS).", "green")
-            print(f"    Suivi : https://github.com/{args.repo}/actions/workflows/release.yml")
-        return 0  # message déjà affiché par compute_diff
-
+    # Une simulation ne doit rien publier, pas même un tag sur un dépôt sans
+    # changement (l'ancien ordre poussait celui d'un --dry-run --new-tag).
     if args.dry_run:
         cprint("\n==> --dry-run : pas de commit ni de push.", "yellow")
         return 0
+
+    if not changed:
+        # --new-tag sans diff : cas légitime (sources déjà poussées lors d'un
+        # patch précédent, on veut ensuite un vrai rebuild taggé).
+        if args.new_tag:
+            cprint(f"\n==> Aucun changement à pousser ; tag {args.new_tag} sur le HEAD courant.", "cyan")
+            _publier_tag(args.new_tag, sha_initial)
+            cprint(f"\n==> Tag {args.new_tag} poussé → release.yml va se déclencher (rebuild ~30 min sur 3 OS).", "green")
+            print(f"    Suivi : https://github.com/{args.repo}/actions/workflows/release.yml")
+        return 0  # message déjà affiché par compute_diff
 
     commit_and_push(args.message, args.new_tag)
 

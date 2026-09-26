@@ -91,9 +91,9 @@ Le onedir est buildé en **2 passes Analysis** :
 | `setup_build_mac.sh` | Prépare la machine macOS |
 | `update_app.py` | Patch du bundle (local / archive mac / release 3 OS) |
 | `deploy.py` | **Déploiement unifié en 1 commande** (cross-platform Win/Mac/Linux) : push, détection du diff, patch cloud/local ou tag pour rebuild |
-| `ci_github.yml` → `…/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
-| `release_github.yml` → `…/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
-| `update_github.yml` → `…/update.yml` | **Update** : patche le code des 3 bundles d'une release, sans rebuild (manuel) |
+| `.github/workflows/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
+| `.github/workflows/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
+| `.github/workflows/update.yml` | **Update** : patche le code des 3 bundles d'une release, sans rebuild (manuel) |
 
 Le venv de build est `~/.gpxsolar/venv` sur les 3 OS, créé par le setup via
 `gpxsolar.py --installer-deps` (qui installe toutes les deps puis quitte sans

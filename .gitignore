@@ -82,3 +82,13 @@ lidar2map/
 ehthumbs.db
 Thumbs.db
 desktop.ini
+
+# ─── Dossier de travail devenu le dépôt (26/09/2026) ───────────────
+# Caches et état de l'application lancée depuis les sources, sauvegardes
+# datées, et le fichier VERSIONINFO qu'écrivent les specs Windows au build.
+LIDAR_CACHE/
+RGEALTI_CACHE/
+gpx_analyzer_prefs.json
+gpx_analyzer_config.json.lock
+*.bak-*
+.version_info.txt
