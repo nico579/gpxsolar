@@ -175,22 +175,68 @@ if getattr(sys, "frozen", False):
             if _need_extract:
                 import time as _time
                 # Lockfile contre les extractions simultanées (double-clic).
+                # Prise de verrou ATOMIQUE via os.open(O_CREAT|O_EXCL) : une
+                # seule instance peut créer le fichier, les autres basculent en
+                # attente. Remplace l'ancien check-then-act (exists() puis
+                # touch()) où deux double-clics voyaient tous deux « pas de
+                # lock », le créaient chacun, puis extrayaient en parallèle
+                # (course corrigée d'abord chez le jumeau lidar2map).
                 # Durci contre les locks ORPHELINS : si le lock est plus vieux
                 # que _LOCK_STALE_S (instance tuée/plantée pendant l'extraction),
                 # on le considère périmé et on le retire au lieu d'attendre 60 s
                 # puis d'échouer. L'extraction du bundle prend ~30 s -> 300 s est
                 # une borne haute sûre (pas de faux positif en cas de double-clic).
                 _LOCK_STALE_S = 300
-                _lock_actif = _lock.exists()
-                if _lock_actif:
+                _app_dir.parent.mkdir(parents=True, exist_ok=True)
+
+                def _prendre_lock():
+                    # True si on crée le verrou (on extrait), False s'il existe
+                    # déjà (une autre instance l'a pris avant nous).
                     try:
-                        _lock_actif = (_time.time() - _lock.stat().st_mtime) < _LOCK_STALE_S
+                        _fd = os.open(str(_lock),
+                                      os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.close(_fd)
+                        return True
+                    except FileExistsError:
+                        return False
+                    except PermissionError:
+                        # Windows : un verrou que l'autre instance vient de
+                        # supprimer, mais qu'un antivirus tient encore ouvert,
+                        # reste « en attente de suppression » ; le recréer est
+                        # refusé au lieu de lever FileExistsError. Il est donc
+                        # encore pris, pour un instant : l'attente ci-dessous le
+                        # verra disparaître. Ailleurs, c'est un vrai refus.
+                        if os.name != "nt":
+                            raise
+                        return False
+
+                def _retirer_lock():
+                    # Même antivirus, côté suppression : sous Windows, unlink()
+                    # échoue (PermissionError) tant qu'il tient le fichier.
+                    # Quelques essais rapprochés, puis on renonce sans planter :
+                    # un verrou resté en place coûte une attente au lancement
+                    # suivant, jamais une installation réussie.
+                    for _essai in range(10):
+                        try:
+                            _lock.unlink(missing_ok=True)
+                            return
+                        except PermissionError:
+                            _time.sleep(0.05)
+
+                _lock_pris = _prendre_lock()
+                if not _lock_pris:
+                    # Verrou déjà présent : périmé (instance morte) ? Si oui,
+                    # nettoyer puis retenter la prise atomique une fois.
+                    _stale = False
+                    try:
+                        _stale = (_time.time() - _lock.stat().st_mtime) >= _LOCK_STALE_S
                     except Exception:
-                        _lock_actif = False
-                    if not _lock_actif:
+                        _stale = True
+                    if _stale:
                         print("  Stale lockfile detected - cleaning up and resuming.", flush=True)
-                        _lock.unlink(missing_ok=True)
-                if _lock_actif:
+                        _retirer_lock()
+                        _lock_pris = _prendre_lock()
+                if not _lock_pris:
                     print("Installation in progress in another instance - waiting...",
                           flush=True)
                     for _ in range(60):
@@ -206,8 +252,6 @@ if getattr(sys, "frozen", False):
                         print(f"  Remove the lockfile and relaunch: {_lock}", flush=True)
                         sys.exit(1)
                 else:
-                    _app_dir.parent.mkdir(parents=True, exist_ok=True)
-                    _lock.touch()
                     try:
                         if _app_dir.exists():
                             import shutil as _sh
@@ -292,7 +336,7 @@ if getattr(sys, "frozen", False):
                         print("  Restart the application to try again.", flush=True)
                         sys.exit(1)
                     finally:
-                        _lock.unlink(missing_ok=True)
+                        _retirer_lock()
 
             _inner_exe = _resolve_exe(_inner_exe)
 

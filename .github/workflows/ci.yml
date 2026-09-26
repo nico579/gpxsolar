@@ -108,5 +108,6 @@ jobs:
         # Extraction ast des fonctions pures, pas d'import du module : ne
         # dépend que de numpy (déjà installé ci-dessus). Couvre bilinéaire,
         # antiméridien, clé du cache solaire, moteur de ray-tracing (chunké
-        # vs référence point à point) et géométrie des rayons KML.
+        # vs référence point à point), géométrie des rayons KML et verrou
+        # d'extraction du lanceur (refus passagers de Windows compris).
         run: python test_gpxsolar.py
