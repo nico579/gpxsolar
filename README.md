@@ -171,6 +171,24 @@ The first launch extracts the bundle (~20-30 s, once — it contains Qt) into:
 Clean uninstall: `gpxsolar(.exe) --desinstaller` (removes the extracted bundle
 + the venv).
 
+### Where gpxsolar keeps its files
+
+Since 1.4.0, gpxsolar no longer writes next to the program. Your settings,
+history and language choice live in your system's standard data folder:
+`%LOCALAPPDATA%\gpxsolar-data` on Windows,
+`~/Library/Application Support/gpxsolar-data` on macOS,
+`~/.local/share/gpxsolar-data` on Linux. The outputs (`GPX_Ombres/`) and the
+elevation and vegetation caches (`HGT/`, `WorldCover/`, `LIDAR_CACHE/`,
+`RGEALTI_CACHE/`), which you browse, copy and delete yourself, go to
+`Documents/gpxsolar`.
+
+Coming from 1.3 or earlier? On first launch, gpxsolar copies your settings and
+history from the folder it used to write into (next to the executable, or
+wherever you ran the script), and leaves your outputs and caches where they
+are, so nothing gets downloaded again. Nothing is deleted: going back to 1.3
+remains possible. To keep everything in a single folder instead (a USB stick,
+for instance), point the `GPXSOLAR_HOME` environment variable at it.
+
 ---
 
 ## Usage
@@ -203,7 +221,7 @@ Then in the window:
 ### Command-line mode (headless)
 
 As soon as you pass an argument, gpxsolar computes **without opening a window** and
-writes the outputs into `GPX_Ombres/` (KMZ / MBTiles / KML depending on the options —
+writes the outputs into `Documents/gpxsolar/GPX_Ombres/` (KMZ / MBTiles / KML depending on the options —
 see [Output files](#output-files--smartphone-overlay)), plus the CSV. The minimum required is
 `--gpx` + `--date` (DD/MM/YYYY) + `--time` (HH:MM). Everything below applies to the
 binary as well as the script — just replace `gpxsolar.exe` with
@@ -232,7 +250,8 @@ gpxsolar.exe --gpx hike.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lida
 
 ## Output files & smartphone overlay
 
-All outputs land in `GPX_Ombres/`. The `<base>` prefix encodes the GPX, the date,
+All outputs land in `GPX_Ombres/`, inside `Documents/gpxsolar` (see
+[Where gpxsolar keeps its files](#where-gpxsolar-keeps-its-files)). The `<base>` prefix encodes the GPX, the date,
 the time, the elevation source, the shadow type and the direction.
 
 **Without `--generate-shadow-map`** (track only):

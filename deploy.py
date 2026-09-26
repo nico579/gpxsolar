@@ -72,9 +72,13 @@ TAG_RELEASE_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 # Patterns "rebuild requis" : si l'un de ces fichiers a changé, le patch ne
 # suffit pas (l'archive launcher PyInstaller ou la spec ne sont pas patchables).
+# Un module interne importé par gpxsolar.py (_dossiers.py, _atomic_files.py,
+# ...) est compilé dans le bundle : le patch, qui ne remplace que gpxsolar.py
+# et gui/, livrerait un gpxsolar.py qui l'importe sans lui.
 def is_rebuild_file(name: str) -> bool:
     return (
         name == "_loader.py"
+        or (name.startswith("_") and name.endswith(".py"))
         or name.endswith(".spec")
         or name.endswith("_build.ps1")
         or name.endswith("_build.sh")

@@ -340,9 +340,10 @@ if getattr(sys, "frozen", False):
 
             _inner_exe = _resolve_exe(_inner_exe)
 
-            # cwd = dossier contenant le launcher (ou parent du .app sur Mac) :
-            # les fichiers cwd-relatifs (gpx_analyzer_history.json, GPX_Ombres/,
-            # …) sont créés là où l'utilisateur a posé l'exe, pas dans _app_dir.
+            # cwd = dossier contenant le launcher (ou parent du .app sur Mac).
+            # Jusqu'à la 1.3, l'état et les sorties y étaient créés ; depuis la
+            # 1.4.0, main() n'y cherche plus que cet ancien état, qu'il reprend
+            # une fois, puis passe au dossier des sorties (voir _dossiers.py).
             if _sys == "Darwin" and ".app" in str(_exe):
                 _work_dir = _exe.parent.parent.parent.parent
             else:
@@ -360,8 +361,8 @@ if getattr(sys, "frozen", False):
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.3.6"
-VERSION_DATE = "2026-07"
+VERSION      = "1.4.0"
+VERSION_DATE = "2026-09"
 
 
 _DEPS_CRITIQUES = [
@@ -785,6 +786,12 @@ import concurrent.futures
 from datetime import datetime, timedelta
 from collections import OrderedDict
 
+# Modules du projet (bibliothèque standard seulement) : dossiers d'état et de
+# sorties depuis la 1.4.0. Importés après le bloc du lanceur, qui n'en a pas
+# besoin ; la passe 1 des specs les embarque dans le bundle.
+import _atomic_files
+import _dossiers
+
 # Les imports tiers (maintenant disponibles)
 import pytz
 # NOTE — imports différés pour accélérer le démarrage GUI :
@@ -1089,10 +1096,15 @@ class LRUTileCache:
 # CONSTANTES ET CONFIGURATION
 # *************************************************************
 OBSERVER_EYE_HEIGHT = 1.7
+# Dossiers de la 1.4.0 (voir _dossiers.py) : réglages, historique et
+# préférences dans le dossier d'état (gpxsolar-data) ; GPX_Ombres et les
+# caches, relatifs au dossier des sorties (Documents/gpxsolar par défaut),
+# dont main() fait le dossier courant. Calcul pur, rien n'est créé ici.
+DOSSIER_ETAT = _dossiers.dossier_etat()
 SHADOW_GPX_DIR = 'GPX_Ombres'
-CONFIG_FILE = 'gpx_analyzer_config.json'
-HISTORY_FILE = 'gpx_analyzer_history.json'
-PREFS_FILE = 'gpx_analyzer_prefs.json'   # préférences UI (langue) — cf. load_lang/save_lang
+CONFIG_FILE = str(DOSSIER_ETAT / 'gpx_analyzer_config.json')
+HISTORY_FILE = str(DOSSIER_ETAT / 'gpx_analyzer_history.json')
+PREFS_FILE = str(DOSSIER_ETAT / _dossiers.PREFERENCES)   # langue et dossier_sorties
 HISTORY_MAX_ENTRIES = 30
 # Workers de la carte d'ombre : adaptatif au lieu d'un 4 codé en dur. Le gain
 # threads plafonne car pysolar (Python pur) ne relâche pas le GIL et numba
@@ -1446,14 +1458,27 @@ def load_lang():
 
 
 def save_lang(code: str) -> bool:
-    """Persiste le choix de langue de l'UI. 'fr' ou 'en' ; sinon ignoré."""
+    """Persiste le choix de langue de l'UI. 'fr' ou 'en' ; sinon ignoré.
+
+    Lecture-modification-écriture sous verrou, comme _ecrire_pref() de
+    lidar2map : le fichier porte aussi dossier_sorties (voir _dossiers.py),
+    qu'une réécriture de la seule langue effacerait."""
     if code not in ("fr", "en"):
         return False
     try:
-        with open(PREFS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({"lang": code}, f, indent=2)
+        with _atomic_files.verrou_inter_processus(PREFS_FILE):
+            prefs = _atomic_files.lire_json(PREFS_FILE, {})
+            prefs = prefs if isinstance(prefs, dict) else {}
+            prefs["lang"] = code
+            temporaire = _atomic_files.chemin_part(PREFS_FILE)
+            try:
+                temporaire.write_text(json.dumps(prefs, ensure_ascii=False, indent=2),
+                                      encoding='utf-8')
+                _atomic_files.remplacer(temporaire, PREFS_FILE)
+            finally:
+                temporaire.unlink(missing_ok=True)
         return True
-    except OSError as e:
+    except (OSError, TimeoutError) as e:
         logging.warning(f"Cannot save preferences: {e}")
         return False
 
@@ -5850,8 +5875,49 @@ def run_headless(args, tz_finder):
         logging.error(f"FATAL ERROR: {e}")
         return 1
     logging.info(f"✓ Computation finished in {(datetime.now() - t0).total_seconds():.0f}s. "
-                 f"Sorties dans {SHADOW_GPX_DIR} ; CSV : {args.output}")
+                 f"Sorties dans {os.path.abspath(SHADOW_GPX_DIR)} ; CSV : {args.output}")
     return 0
+
+
+# Arguments qui désignent un chemin donné par l'utilisateur, avec leur valeur
+# par défaut : une valeur par défaut relative reste relative, pour tomber dans
+# le dossier des sorties.
+_ARGUMENTS_CHEMINS = (("gpx", None), ("output", "analyse_solaire.csv"),
+                      ("hgt_dir", "HGT"), ("vegetation_dir", "WorldCover"),
+                      ("temp_dir", None))
+
+
+def _preparer_dossiers(args):
+    """Dossiers de la 1.4.0 (voir _dossiers.py), au lancement du programme et
+    jamais à un simple import.
+
+    Reprend une fois l'état qu'une version <= 1.3 rangeait dans le dossier
+    courant, puis fait du dossier des sorties le dossier courant : GPX_Ombres
+    et les caches, que le code désigne par des chemins relatifs, y tombent.
+    Les chemins donnés sur la ligne de commande sont d'abord rendus absolus,
+    pour rester relatifs au dossier d'où l'on a lancé gpxsolar, comme avant.
+    Le sous-processus d'analyse de l'interface (GPXSOLAR_CHILD=1) hérite déjà
+    du dossier des sorties : la reprise, faite par le parent, ne s'y rejoue
+    pas. Jamais bloquante : si elle échoue, l'ancien état reste en place et
+    sera repris au lancement suivant."""
+    depart = Path.cwd()
+    for nom, defaut in _ARGUMENTS_CHEMINS:
+        valeur = getattr(args, nom, None)
+        if valeur and valeur != defaut:
+            setattr(args, nom, str((depart / valeur).resolve()))
+    if os.environ.get("GPXSOLAR_CHILD") != "1":
+        try:
+            repris = _dossiers.preparer_etat(depart, version=VERSION)
+        except (OSError, TimeoutError) as exc:
+            logging.warning(f"State migration postponed ({exc}).")
+        else:
+            if repris:
+                logging.info(f"State moved from {depart} to {DOSSIER_ETAT}: "
+                             f"{', '.join(repris)}.")
+    DOSSIER_ETAT.mkdir(parents=True, exist_ok=True)
+    sorties = _dossiers.dossier_sorties(DOSSIER_ETAT)
+    sorties.mkdir(parents=True, exist_ok=True)
+    os.chdir(sorties)
 
 
 def main():
@@ -5958,6 +6024,7 @@ def main():
     if os.environ.get("GPXSOLAR_CHILD") == "1":
         _install_gui_ipc_logging()
 
+    _preparer_dossiers(args)
     if not os.path.exists(SHADOW_GPX_DIR): os.makedirs(SHADOW_GPX_DIR)
 
     # TimezoneFinder en lazy load : son init charge ~52 Mo de polygones

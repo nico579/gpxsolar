@@ -172,6 +172,24 @@ Le premier lancement extrait le bundle (~20-30 s, une fois — il contient Qt) d
 Désinstallation propre : `gpxsolar(.exe) --desinstaller` (supprime le bundle
 extrait + le venv).
 
+### Où gpxsolar range ses fichiers
+
+Depuis la 1.4.0, gpxsolar n'écrit plus à côté du programme. Vos réglages, votre
+historique et votre choix de langue vivent dans le dossier de données standard
+du système : `%LOCALAPPDATA%\gpxsolar-data` sous Windows,
+`~/Library/Application Support/gpxsolar-data` sous macOS,
+`~/.local/share/gpxsolar-data` sous Linux. Les sorties (`GPX_Ombres/`) et les
+caches de relief et de végétation (`HGT/`, `WorldCover/`, `LIDAR_CACHE/`,
+`RGEALTI_CACHE/`), que vous parcourez, copiez et supprimez vous-même, vont dans
+`Documents/gpxsolar`.
+
+Vous venez d'une 1.3 ou antérieure ? Au premier lancement, gpxsolar copie vos
+réglages et votre historique depuis le dossier où il écrivait (à côté de
+l'exécutable, ou là d'où vous lanciez le script), et laisse vos sorties et vos
+caches où ils sont : rien n'est à retélécharger. Rien n'est effacé, et revenir
+à la 1.3 reste possible. Pour tout garder dans un seul dossier (une clé USB,
+par exemple), faites pointer la variable d'environnement `GPXSOLAR_HOME` dessus.
+
 ---
 
 ## Utilisation
@@ -204,7 +222,7 @@ Puis dans la fenêtre :
 ### Mode ligne de commande (headless)
 
 Dès qu'on passe un argument, gpxsolar calcule **sans ouvrir de fenêtre** et écrit
-les sorties dans `GPX_Ombres/` (KMZ / MBTiles / KML selon les options — voir
+les sorties dans `Documents/gpxsolar/GPX_Ombres/` (KMZ / MBTiles / KML selon les options — voir
 [Fichiers de sortie](#fichiers-de-sortie--superposition-smartphone)), plus le CSV. Le minimum requis est
 `--gpx` + `--date` (JJ/MM/AAAA) + `--time` (HH:MM). Tout ce qui suit vaut pour le
 binaire comme pour le script — remplacez simplement `gpxsolar.exe` par
@@ -233,7 +251,8 @@ gpxsolar.exe --gpx rando.gpx --date 21/06/2024 --time 09:00 --dem-source ign_lid
 
 ## Fichiers de sortie & superposition smartphone
 
-Toutes les sorties atterrissent dans `GPX_Ombres/`. Le préfixe `<base>` encode
+Toutes les sorties atterrissent dans `GPX_Ombres/`, au sein de `Documents/gpxsolar` (voir
+[Où gpxsolar range ses fichiers](#où-gpxsolar-range-ses-fichiers)). Le préfixe `<base>` encode
 le GPX, la date, l'heure, la source d'altitude, le type d'ombre et le sens.
 
 **Sans `--generate-shadow-map`** (tracé seul) :

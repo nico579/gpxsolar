@@ -5,7 +5,8 @@ on:
     paths:
       - 'gpxsolar.py'
       - 'test_gpxsolar.py'
-      - '_loader.py'
+      - 'test_dossiers.py'
+      - '_*.py'
       - 'deploy.py'
       - 'update_app.py'
       - 'smoke_gpxsolar.py'
@@ -15,7 +16,8 @@ on:
     paths:
       - 'gpxsolar.py'
       - 'test_gpxsolar.py'
-      - '_loader.py'
+      - 'test_dossiers.py'
+      - '_*.py'
       - 'deploy.py'
       - 'update_app.py'
       - 'smoke_gpxsolar.py'
@@ -116,3 +118,9 @@ jobs:
         # vs référence point à point), géométrie des rayons KML et verrou
         # d'extraction du lanceur (refus passagers de Windows compris).
         run: python test_gpxsolar.py
+
+      - name: Dossiers d'état et de sorties (test_dossiers.py)
+        # Reprise unique de l'état d'une version <= 1.3, chemins de la ligne
+        # de commande, et un vrai lancement de gpxsolar.py qui ne doit rien
+        # créer. Dossiers isolés : jamais ceux du runner.
+        run: python test_dossiers.py

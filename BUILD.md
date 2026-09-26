@@ -79,6 +79,8 @@ Le onedir est buildé en **2 passes Analysis** :
 | Fichier | Rôle |
 |---|---|
 | `_loader.py` | Entry point du binaire (ne change jamais) |
+| `_dossiers.py` | Dossiers d'état (`gpxsolar-data`) et de sorties (`Documents/gpxsolar`), reprise de l'état d'une 1.3 : jumeau de celui de lidar2map |
+| `_atomic_files.py` | Écriture atomique et verrou entre processus, sous-ensemble de celui de lidar2map |
 | `gpxsolar_win.spec` | Spec onedir **Windows ET Linux** (ELF) |
 | `gpxsolar_win_launcher.spec` | Spec launcher Windows onefile |
 | `gpxsolar_win_build.ps1` | Build Windows (3 étapes) |
@@ -313,10 +315,17 @@ bootstrap s'exécute à l'import) ; le source des fonctions est extrait via
 ```bash
 python test_gpxsolar.py     # runner intégré, code de sortie != 0 si échec
 pytest test_gpxsolar.py     # équivalent via pytest
+python test_dossiers.py     # dossiers d'état et de sorties (unittest)
 ```
 
+`test_dossiers.py` éprouve `_dossiers.py` et son branchement dans
+`gpxsolar.py` : reprise unique de l'état d'une 1.3, chemins de la ligne de
+commande, et un vrai `gpxsolar.py --version` qui ne doit rien créer. Il isole
+toujours ses dossiers : jamais ceux de l'utilisateur.
+
 La CI (`.github/workflows/ci.yml`) les exécute sur les 3 OS à chaque push
-touchant `gpxsolar.py`, `test_gpxsolar.py`, `_loader.py` ou `deploy.py`.
+touchant `gpxsolar.py`, un module `_*.py`, un des deux fichiers de tests ou
+`deploy.py`.
 
 ### Run témoin (validation manuelle de bout en bout)
 
