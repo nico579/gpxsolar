@@ -29,6 +29,7 @@ if not os.environ.get("GPXSOLAR_HOME"):
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 import _dossiers  # noqa: E402
+import _installation  # noqa: E402
 
 
 class _Isole(unittest.TestCase):
@@ -193,7 +194,11 @@ def _preparer_dossiers_de_gpxsolar(etat):
     gpxsolar.py comme le fait test_gpxsolar.py : son import lancerait le
     bootstrap et chargerait toutes ses dépendances."""
     source = (ROOT / "gpxsolar.py").read_text(encoding="utf-8")
+    # sys à part : un test du programme figé le remplace dans cet espace,
+    # jamais dans le vrai module sys.
     espace = {"Path": Path, "os": os, "logging": logging, "_dossiers": _dossiers,
+              "_installation": _installation, "sys": types.SimpleNamespace(
+                  frozen=False, executable=sys.executable),
               "VERSION": "1.4.0", "DOSSIER_ETAT": etat}
     for noeud in ast.parse(source).body:
         cible = (noeud.name if isinstance(noeud, ast.FunctionDef) else
@@ -249,6 +254,34 @@ class PreparerDossiersTests(_Isole):
         self.assertFalse((self.etat / "gpx_analyzer_history.json").exists())
         self.assertEqual(Path.cwd(), self.documents / "gpxsolar")
 
+    def test_programme_fige_reprend_l_etat_de_son_propre_dossier(self):
+        # Sans lanceur depuis la 1.5, le programme figé peut partir de
+        # n'importe où (« / » depuis le Finder, le dossier d'un raccourci) :
+        # l'état d'une 1.3 se reprend dans le dossier du programme, où le
+        # lanceur le lançait, pas dans le dossier courant.
+        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
+        ailleurs = self.racine / "ailleurs"
+        ailleurs.mkdir()
+        os.chdir(ailleurs)
+        self.preparer.__globals__["sys"] = types.SimpleNamespace(
+            frozen=True, executable=str(self.ancien / "gpxsolar.exe"))
+
+        self.preparer(self.arguments())
+
+        self.assertTrue((self.etat / "gpx_analyzer_history.json").is_file())
+
+
+def _version_du_code():
+    """La constante VERSION de gpxsolar.py. Une version écrite en dur dans le
+    test est à changer à chaque release, et un oubli ne se voit qu'en CI :
+    ici, sans les dépendances, le test est sauté."""
+    source = (ROOT / "gpxsolar.py").read_text(encoding="utf-8")
+    for noeud in ast.parse(source).body:
+        if (isinstance(noeud, ast.Assign) and isinstance(noeud.targets[0], ast.Name)
+                and noeud.targets[0].id == "VERSION"):
+            return ast.literal_eval(noeud.value)
+    raise AssertionError("constante VERSION introuvable dans gpxsolar.py")
+
 
 class LancementReelTests(unittest.TestCase):
     """Le vrai programme : --version sort avant main(), et ni l'import ni
@@ -269,7 +302,7 @@ class LancementReelTests(unittest.TestCase):
                 # vivent dans ~/.gpxsolar/venv) ; la CI, elle, les installe.
                 self.skipTest("dépendances critiques absentes de ce Python")
             self.assertEqual(resultat.returncode, 0, sortie)
-            self.assertIn("gpxsolar 1.4.0", resultat.stdout)
+            self.assertIn(f"gpxsolar {_version_du_code()}", resultat.stdout)
             self.assertFalse(home.exists(), "--version a créé le dossier d'état")
             self.assertEqual(list(Path(tmp).iterdir()), [], "--version a écrit dans le dossier courant")
 

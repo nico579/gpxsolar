@@ -5,17 +5,19 @@ Spec PyInstaller pour gpxsolar — macOS ARM64, onedir.
 Usage :
     ~/.gpxsolar/venv/bin/pyinstaller gpxsolar_mac.spec --clean --noconfirm
 
-Résultat :
-    dist_onedir/gpxsolar/gpxsolar          (exécutable interne)
-    dist_onedir/gpxsolar/_internal/
-        gpxsolar.py          (livré en clair, exécuté par _loader.py)
-        PyQt6/, pyproj/, rasterio/, ...
+Résultat (le programme livré tel quel depuis la 1.5.0) :
+    dist/GPXSOLAR.app                      (BUNDLE, voir la fin du fichier)
+        Contents/MacOS/gpxsolar
+        Contents/Frameworks/               (sys._MEIPASS : binaires, Qt compris)
+        Contents/Resources/                (données : gpxsolar.py, gui/, ...)
+    dist/gpxsolar/                         (dossier onedir intermédiaire)
 
 Architecture (miroir lidar2map) :
   - Entry point = _loader.py, qui exécute _internal/gpxsolar.py.
   - 2 passes Analysis (détection sur gpxsolar.py, build sur _loader.py).
-  - Ce onedir est ensuite zippé et le bundle est copié dans
-    GPXSOLAR.app/Contents/Resources/ par gpxsolar_mac_build.sh (étapes 2-4).
+  - Jusqu'à la 1.4, ce onedir était zippé dans un lanceur .app qui
+    l'extrayait ; depuis la 1.5, le .app est le programme lui-même, que
+    gpxsolar_mac_build.sh signe puis archive.
 """
 
 from pathlib import Path
@@ -203,4 +205,20 @@ exe = EXE(
 coll = COLLECT(
     exe, a.binaries, a.datas,
     strip=False, upx=False, upx_exclude=[], name=NAME,
+)
+
+# Même nom et même identifiant que le .app du lanceur des versions <= 1.4 :
+# remplacé par celui-ci au même endroit, il garde sa place dans le Dock.
+app = BUNDLE(
+    coll,
+    name="GPXSOLAR.app",
+    icon=None,
+    bundle_identifier="fr.nicolas.gpxsolar",
+    info_plist={
+        "NSHighResolutionCapable": "True",
+        "NSRequiresAquaSystemAppearance": "No",
+        "NSAppTransportSecurity": {
+            "NSAllowsArbitraryLoads": True,
+        },
+    },
 )

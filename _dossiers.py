@@ -11,9 +11,10 @@ est fourni, regroupe l'un et l'autre, comme le dossier courant le faisait
 jusqu'à la 1.3.
 
 Le dossier d'état s'appelle gpxsolar-data et non gpxsolar : sous ce nom-là,
-le dossier standard est déjà celui où le lanceur extrait le programme, et
-son option --desinstaller le supprime. Les réglages et l'historique ne
-doivent pas partir avec lui.
+le dossier standard est celui où le lanceur d'une version <= 1.4 extrayait
+le programme, que la 1.5 retire au démarrage et que --desinstaller supprime
+(voir _installation.py). Les réglages et l'historique ne doivent pas partir
+avec lui.
 """
 
 from __future__ import annotations
@@ -93,8 +94,9 @@ def dossier_sorties(etat=None, environnement=None) -> Path:
 
 def preparer_etat(ancien, *, version="", environnement=None) -> list:
     """Reprend, une fois, l'état qu'une version <= 1.3 rangeait dans son
-    dossier courant `ancien` (celui du lanceur, ou celui d'où l'on lançait
-    les sources), et rend la liste de ce qui a été repris. Sans effet avec
+    dossier courant `ancien` (le dossier du programme figé, où le lanceur le
+    lançait, ou celui d'où l'on lançait les sources), et rend la liste de ce
+    qui a été repris. Sans effet avec
     GPXSOLAR_HOME.
 
     Appelée au démarrage par gpxsolar.py, dans main() seulement : un simple

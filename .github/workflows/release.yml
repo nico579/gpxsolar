@@ -6,13 +6,22 @@ name: Release (build 3 OS)
 #
 # Déclenchement :
 #   - push d'un tag v*           (ex: git tag v1.0.0 && git push origin v1.0.0)
-#   - manuel (workflow_dispatch) avec saisie du tag
+#   - manuel (workflow_dispatch) avec saisie du tag ; publier=false construit
+#     et éprouve les 4 binaires sans rien publier, pour valider une branche
+#     qui touche au build avant de l'étiqueter
 #
 # Assets produits :
-#   gpxsolar-windows-x86_64.zip     (dossier : gpxsolar.exe + gpxsolar_bundle.zip)
-#   gpxsolar-linux-x86_64.tar.gz    (dossier : gpxsolar    + gpxsolar_bundle.zip)
+#   gpxsolar-windows-x86_64.zip     (dossier : gpxsolar.exe + _internal/)
+#   gpxsolar-linux-x86_64.tar.gz    (dossier : gpxsolar     + _internal/)
 #   gpxsolar-macos-arm64.zip        (GPXSOLAR.app zippé via ditto, Apple Silicon)
 #   gpxsolar-macos-x86_64.zip       (idem, Mac Intel)
+#
+# Depuis la 1.5, chaque archive contient le programme tel quel (dossier
+# onedir de PyInstaller, ou .app), comme celles de lidar2map. Jusqu'à la 1.4,
+# un lanceur l'extrayait d'un bundle zippé au premier lancement. Le nom des
+# archives et de leur dossier racine n'a pas changé : décompressée par-dessus
+# la précédente, une archive met le programme à la place du lanceur, au même
+# chemin (raccourcis compris).
 #
 # Deux runners macOS : macos-latest est Apple Silicon depuis 2024, il ne peut
 # donc plus produire de binaire Intel. macos-15-intel est le dernier runner
@@ -29,6 +38,10 @@ on:
       tag:
         description: 'Tag de la release (ex: v1.0.0)'
         required: true
+      publier:
+        description: 'Publier la release (décocher : construire et éprouver seulement)'
+        type: boolean
+        default: true
 
 # Droits minimaux du GITHUB_TOKEN : lecture seule. Un job qui publie
 # déclare lui-même le droit d'écriture dont il a besoin.
@@ -68,22 +81,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Le dossier onedir devient le dossier racine de l'archive, sous le
+          # nom qu'elle a toujours eu (voir l'en-tête).
           $stage = "dist\gpxsolar-windows-x86_64"
-          New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item dist\gpxsolar.exe          $stage\
-          Copy-Item dist\gpxsolar_bundle.zip   $stage\
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          Move-Item dist\gpxsolar $stage
           $zip = "dist\gpxsolar-windows-x86_64.zip"
           Compress-Archive -Path $stage -DestinationPath $zip -Force
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() |
             Out-File "$zip.sha256" -Encoding ascii -NoNewline
 
+      # Lance l'archive telle qu'elle sera publiée (démarrage, ménage d'un
+      # ancien lanceur) : toutes les autres suites tournent sur les sources.
+      # Bloquant : le job publish exige tous les builds.
+      - name: Smoke test exe (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python exe_smoke.py dist\gpxsolar-windows-x86_64.zip
+
       # ── Linux ────────────────────────────────────────────────────────────
       - name: Setup machine (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y zip
-          bash setup_build_linux.sh
+        run: bash setup_build_linux.sh
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
@@ -92,12 +111,16 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/gpxsolar-linux-x86_64
-          cp dist/gpxsolar             dist/gpxsolar-linux-x86_64/
-          cp dist/gpxsolar_bundle.zip  dist/gpxsolar-linux-x86_64/
+          # Le dossier onedir devient le dossier racine de l'archive.
+          rm -rf dist/gpxsolar-linux-x86_64
+          mv dist/gpxsolar dist/gpxsolar-linux-x86_64
           tar czf dist/gpxsolar-linux-x86_64.tar.gz -C dist gpxsolar-linux-x86_64
           sha256sum dist/gpxsolar-linux-x86_64.tar.gz | awk '{print $1}' \
             > dist/gpxsolar-linux-x86_64.tar.gz.sha256
+
+      - name: Smoke test exe (Linux)
+        if: runner.os == 'Linux'
+        run: python exe_smoke.py dist/gpxsolar-linux-x86_64.tar.gz
 
       # ── macOS ────────────────────────────────────────────────────────────
       - name: Setup machine (macOS)
@@ -117,6 +140,12 @@ jobs:
           zip=$(ls dist/gpxsolar-macos-*.zip)
           shasum -a 256 "$zip" | awk '{print $1}' > "$zip.sha256"
 
+      # Lancé depuis le shell du runner, le binaire ne passe pas par
+      # Gatekeeper : ce test ne dit rien de la quarantaine.
+      - name: Smoke test exe (macOS)
+        if: runner.os == 'macOS'
+        run: python exe_smoke.py "$(ls dist/gpxsolar-macos-*.zip)"
+
       # ── Upload artefact (asset + .sha256) ────────────────────────────────
       - name: Upload artefact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -133,6 +162,9 @@ jobs:
   publish:
     name: publish release
     needs: build
+    # Toujours sur un tag poussé ; en lancement manuel, sauf si publier est
+    # décoché (construire et éprouver seulement).
+    if: github.event_name == 'push' || inputs.publier
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -154,7 +186,7 @@ jobs:
           set -euo pipefail
           # Collecter les assets (zip/tar.gz) et leurs SHA256
           ASSETS=()
-          BODY=$'## gpxsolar '"$TAG"$'\n\nExécutables autonomes (Python + dépendances embarqués, aucune installation).\n\nPremier lancement : extraction locale (~5-10 s). Mise à jour : décompresser cette archive par-dessus la précédente.\n\n| Fichier | SHA256 |\n|---|---|\n'
+          BODY=$'## gpxsolar '"$TAG"$'\n\nExécutables autonomes (Python + dépendances embarqués, aucune installation).\n\nL’archive contient le programme lui-même : il démarre sans extraction préalable. Mise à jour : décompresser cette archive par-dessus la précédente (sous macOS, remplacer GPXSOLAR.app). Ce que le lanceur d’une version 1.4 ou antérieure laissait sur le disque est retiré au démarrage.\n\n| Fichier | SHA256 |\n|---|---|\n'
           while IFS= read -r sha; do
             asset="${sha%.sha256}"
             name="$(basename "$asset")"

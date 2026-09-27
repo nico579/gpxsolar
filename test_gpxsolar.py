@@ -18,11 +18,6 @@ import ast
 import math
 import os
 import sys
-import tempfile
-import textwrap
-import threading
-import time
-from pathlib import Path
 
 import numpy as np
 
@@ -312,111 +307,6 @@ def test_extend_to_sun_heads_toward_azimuth():
         assert alt2 > 100.0, "le rayon vers le soleil doit monter"
     # Soleil sous l'horizon : pas de rayon.
     assert ns["extend_to_sun"](45.0, 6.0, 100.0, 180.0, -1.0) is None
-
-
-# ---------------------------------------------------------------------------
-# Verrou d'extraction du lanceur (bloc « frozen »)
-# ---------------------------------------------------------------------------
-# Le lanceur ne tourne que dans l'exécutable figé, et ses deux fonctions de
-# verrou y sont imbriquées : on les extrait par ast.walk, puis on les exécute
-# pour de vrai sur des fichiers temporaires. Sous Windows, un antivirus qui
-# tient encore un fichier tout juste supprimé le laisse « en attente de
-# suppression » : le recréer lève alors PermissionError, et le supprimer est
-# refusé tant qu'il le tient sans partager la suppression.
-
-_LANCEUR = ("_prendre_lock", "_retirer_lock")
-_LECTURE, _SUPPRESSION = 0x80000000, 0x00010000
-_PARTAGE_SANS_SUPPRESSION, _PARTAGE_TOTAL = 0x1 | 0x2, 0x1 | 0x2 | 0x4
-_SUPPRIMER_A_LA_FERMETURE = 0x04000000
-
-
-def _fonctions_du_lanceur(verrou):
-    with open(SRC_PATH, encoding="utf-8") as f:
-        src = f.read()
-    lignes = src.splitlines(keepends=True)
-    noeuds = [n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.FunctionDef) and n.name in _LANCEUR]
-    assert sorted(n.name for n in noeuds) == sorted(_LANCEUR), [n.name for n in noeuds]
-    ns = {"os": os, "_time": time, "_lock": Path(verrou)}
-    for n in noeuds:
-        exec(textwrap.dedent("".join(lignes[n.lineno - 1:n.end_lineno])), ns)
-    return ns
-
-
-def _poignee_windows(chemin, acces, partage, drapeaux=0):
-    """Ouvre `chemin` comme le ferait un antivirus ; rend (kernel32, poignée).
-    Instance de kernel32 propre au test : ses argtypes ne touchent pas
-    ctypes.windll, partagé avec le reste du processus."""
-    import ctypes
-    from ctypes import wintypes
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    k32.CreateFileW.restype = wintypes.HANDLE
-    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
-                                wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
-                                wintypes.HANDLE]
-    k32.CloseHandle.argtypes = [wintypes.HANDLE]
-    poignee = k32.CreateFileW(str(chemin), acces, partage, None, 3, drapeaux, None)
-    if poignee in (None, wintypes.HANDLE(-1).value):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return k32, poignee
-
-
-def test_lanceur_un_seul_verrou_d_extraction():
-    with tempfile.TemporaryDirectory() as dossier:
-        verrou = Path(dossier) / ".gpxsolar_extracting"
-        lanceur = _fonctions_du_lanceur(verrou)
-        assert lanceur["_prendre_lock"]() is True
-        assert lanceur["_prendre_lock"]() is False, "deux instances extrairaient ensemble"
-        lanceur["_retirer_lock"]()
-        assert not verrou.exists()
-
-
-def test_lanceur_verrou_en_attente_de_suppression_reste_pris():
-    if os.name != "nt":
-        return  # état propre au système de fichiers de Windows
-    with tempfile.TemporaryDirectory() as dossier:
-        verrou = Path(dossier) / ".gpxsolar_extracting"
-        lanceur = _fonctions_du_lanceur(verrou)
-        verrou.write_bytes(b"")
-        k32, lecteur = _poignee_windows(verrou, _LECTURE, _PARTAGE_TOTAL)
-        try:
-            _, suppresseur = _poignee_windows(verrou, _SUPPRESSION, _PARTAGE_TOTAL,
-                                              _SUPPRIMER_A_LA_FERMETURE)
-            k32.CloseHandle(suppresseur)
-            try:
-                os.close(os.open(verrou, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-                raise AssertionError("état non reproduit : création exclusive acceptée")
-            except PermissionError:
-                pass
-            assert lanceur["_prendre_lock"]() is False
-        finally:
-            k32.CloseHandle(lecteur)
-        assert lanceur["_prendre_lock"]() is True
-
-
-def test_lanceur_suppression_refusee_ne_plante_pas():
-    if os.name != "nt":
-        return  # refus propre à Windows
-    with tempfile.TemporaryDirectory() as dossier:
-        verrou = Path(dossier) / ".gpxsolar_extracting"
-        lanceur = _fonctions_du_lanceur(verrou)
-        verrou.write_bytes(b"")
-        # Refusé tout du long : on renonce sans planter.
-        k32, lecteur = _poignee_windows(verrou, _LECTURE, _PARTAGE_SANS_SUPPRESSION)
-        try:
-            lanceur["_retirer_lock"]()
-            assert verrou.exists()
-        finally:
-            k32.CloseHandle(lecteur)
-        # Refusé un instant seulement : les essais rapprochés aboutissent.
-        k32, lecteur = _poignee_windows(verrou, _LECTURE, _PARTAGE_SANS_SUPPRESSION)
-        minuterie = threading.Timer(0.2, k32.CloseHandle, (lecteur,))
-        minuterie.start()
-        try:
-            lanceur["_retirer_lock"]()
-        finally:
-            minuterie.join()
-        assert not verrou.exists()
 
 
 # ---------------------------------------------------------------------------

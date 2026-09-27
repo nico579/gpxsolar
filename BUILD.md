@@ -9,32 +9,41 @@ L'architecture est calquée sur celle de lidar2map.
 
 ## 1. Vue d'ensemble
 
-Un même `gpxsolar.py` est buildé en **deux** binaires PyInstaller :
+Depuis la 1.5.0, chaque archive de release contient le programme lui-même,
+comme celles de lidar2map, blink2video et watch2notif : le dossier onedir de
+PyInstaller sous Windows et Linux, un `.app` sous macOS.
 
 ```
-┌─────────────────────────┐        ┌──────────────────────────────────────┐
-│  launcher (onefile)     │ spawn  │  app interne (onedir)                  │
-│  gpxsolar.exe / .app /  │ ─────► │  %LOCALAPPDATA%\gpxsolar\gpxsolar.exe  │
-│  gpxsolar (Linux)       │        │  (extrait depuis le bundle au 1er run) │
-│  ~9-15 Mo, stdlib seul  │        │  ~500-650 Mo (Qt + deps géo)           │
-└─────────────────────────┘        └──────────────────────────────────────┘
-            │
-            │ lit, à CÔTÉ de lui (pas embarqué) :
-            ▼
-   gpxsolar_bundle.zip   ← le onedir zippé
+gpxsolar-windows-x86_64/           (gpxsolar-linux-x86_64/ sous Linux)
+  gpxsolar.exe                     entry point = _loader.py
+  _internal/
+    gpxsolar.py                    exécuté en texte par _loader.py
+    gui/, PyQt6/, pyproj/, rasterio/, ...
+
+GPXSOLAR.app/                      (macOS)
+  Contents/MacOS/gpxsolar
+  Contents/Frameworks/             sys._MEIPASS : binaires (Qt compris),
+                                   liens vers les données
+  Contents/Resources/              données (gpxsolar.py, gui/...)
 ```
 
-1. **onedir** (`gpxsolar_win.spec` / `gpxsolar_mac.spec`) : la vraie application,
-   lourde (numpy, rasterio, pyproj, shapely, pysolar, pywebview…). Lente à
-   packager, rapide à lancer.
-2. **launcher onefile** (`*_launcher.spec`) : un petit binaire qui n'utilise que
-   la stdlib. À l'exécution, il cherche `gpxsolar_bundle.zip` **à côté de lui**,
-   l'extrait dans le dossier applicatif système (avec contrôle SHA + mtime pour
-   détecter les mises à jour), puis spawn l'exe interne avec la sentinelle
-   `--__gpxsolar_inner__`.
+Le onedir (`gpxsolar_win.spec` / `gpxsolar_mac.spec`) est la vraie
+application, lourde (numpy, rasterio, pyproj, shapely, pysolar, pywebview…) :
+lente à packager, rapide à lancer. Sous macOS, `BUNDLE()` en fait
+`GPXSOLAR.app`, sous le nom et l'identifiant qu'avait le `.app` du lanceur.
 
-Le bloc launcher vit en tête de `gpxsolar.py` (gardé par `if getattr(sys,
-"frozen", False)`). En mode développement (`python gpxsolar.py`) il est inerte.
+Jusqu'à la 1.4, un lanceur onefile contenait ce dossier zippé
+(`gpxsolar_bundle.zip`) et l'extrayait au premier lancement dans
+`%LOCALAPPDATA%\gpxsolar\`, `~/Library/Application Support/gpxsolar/` ou
+`~/.local/share/gpxsolar/` : deux exemplaires sur disque, et une extraction
+de 20 à 30 s après chaque mise à jour. Au démarrage, la 1.5 retire ce qu'un
+tel lanceur a laissé : son extraction, reconnue à sa marque `.bundle_sha`, et
+le `gpxsolar_bundle.zip` resté à côté du programme quand l'archive est
+décompressée par-dessus (`_installation.nettoyer_ancienne_extraction`). Si
+une ancienne instance tourne encore depuis l'extraction, son renommage
+échoue sous Windows et le ménage attend le lancement suivant. Le nom des
+archives et de leur dossier racine n'a pas changé : décompressée par-dessus,
+une archive met le programme au chemin du lanceur, raccourcis compris.
 
 ### Backend GUI : Qt sur les 3 OS
 
@@ -47,25 +56,20 @@ délibéré : le backend WinForms/WebView2 par défaut passe par pythonnet/.NET,
 gelée au clic, plus des freezes WinForms intermittents. Qt supprime toute la
 couche .NET et donne le même moteur Chromium partout.
 
-Conséquences : bundle Windows plus gros (QtWebEngine, ~390 Mo zippé vs ~180 en
-WinForms) et 1ʳᵉ extraction plus longue (~20-30 s). Les specs `*_win.spec`
+Conséquence : une archive Windows plus grosse (QtWebEngine, ~390 Mo zippée
+contre ~180 en WinForms). Les specs `*_win.spec`
 bundlent PyQt6 (`collect_all`) et excluent winforms/clr/pythonnet ; le venv de
 build doit donc contenir `PyQt6 PyQt6-WebEngine qtpy` (installés par
 `--installer-deps` / `setup_build_*`).
-
-### Pourquoi le bundle est à côté et pas embarqué
-
-Le `.zip` séparé servait au patch sans reconstruction (`update_app.py`,
-`update.yml`), retiré le 26 septembre 2026 comme sur lidar2map : depuis,
-toute livraison passe par une release reconstruite (section 4).
 
 ### Le rôle de `_loader.py`
 
 L'entry point PyInstaller du onedir est `_loader.py` (et **non** `gpxsolar.py`).
 `_loader.py` ne change jamais : il se contente d'exécuter `_internal/gpxsolar.py`
-via `runpy.run_path`. `gpxsolar.py` est donc livré **en clair** dans le bundle
-(`_internal/gpxsolar.py`). C'était le support du patch sans reconstruction ;
-le mécanisme reste en place, sans autre usage.
+via `runpy.run_path`. `gpxsolar.py` est donc livré **en clair** dans le
+programme (`_internal/gpxsolar.py`). C'était le support du patch sans
+reconstruction, retiré le 26 septembre 2026 comme sur lidar2map ; le
+mécanisme reste en place, sans autre usage.
 
 Le onedir est buildé en **2 passes Analysis** :
 - Passe 1 : analyse `gpxsolar.py` pour détecter ses imports (sqlite3, ssl, xml…).
@@ -81,16 +85,16 @@ Le onedir est buildé en **2 passes Analysis** :
 | `_loader.py` | Entry point du binaire (ne change jamais) |
 | `_dossiers.py` | Dossiers d'état (`gpxsolar-data`) et de sorties (`Documents/gpxsolar`), reprise de l'état d'une 1.3 : jumeau de celui de lidar2map |
 | `_atomic_files.py` | Écriture atomique et verrou entre processus, sous-ensemble de celui de lidar2map |
+| `_installation.py` | Dossier du programme, ménage de ce qu'un lanceur ≤ 1.4 laissait, `--desinstaller` : jumeau des fonctions de lidar2map |
 | `gpxsolar_win.spec` | Spec onedir **Windows ET Linux** (ELF) |
-| `gpxsolar_win_launcher.spec` | Spec launcher Windows onefile |
-| `gpxsolar_win_build.ps1` | Build Windows (3 étapes) |
+| `gpxsolar_win_build.ps1` | Build Windows (une passe PyInstaller) |
 | `setup_build_windows.ps1` | Prépare la machine Windows |
 | `gpxsolar_linux_build.sh` | Build Linux (réutilise `_win.spec`) |
 | `setup_build_linux.sh` | Prépare la machine Linux |
-| `gpxsolar_mac.spec` | Spec onedir macOS ARM64 |
-| `gpxsolar_mac_launcher.spec` | Spec launcher macOS (`.app`) |
-| `gpxsolar_mac_build.sh` | Build macOS (4 étapes) |
+| `gpxsolar_mac.spec` | Spec macOS (arm64 ou x86_64) : onedir puis `GPXSOLAR.app` (`BUNDLE`) |
+| `gpxsolar_mac_build.sh` | Build macOS (3 étapes : PyInstaller, signature ad hoc du `.app`, archive ditto) |
 | `setup_build_mac.sh` | Prépare la machine macOS |
+| `exe_smoke.py` | Épreuve du binaire publié (démarrage, ménage de l'ancien lanceur), lancée par `release.yml` sur les 4 runners |
 | `deploy.py` | **Déploiement unifié en 1 commande** (cross-platform Win/Mac/Linux) : tests, commit et push depuis ce dépôt, puis tag et suivi du build de release |
 | `.github/workflows/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
 | `.github/workflows/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
@@ -107,16 +111,16 @@ lancer la GUI), avec PyInstaller ajouté ensuite.
 ```powershell
 .\setup_build_windows.ps1     # une fois : Python 3.12, deps, PyInstaller
 .\gpxsolar_win_build.ps1      # à chaque maj de gpxsolar.py
-# -> dist\gpxsolar.exe + dist\gpxsolar_bundle.zip
+# -> dist\gpxsolar\ (gpxsolar.exe + _internal\)
 ```
 
 ### Linux (Ubuntu / Debian)
 ```bash
 bash setup_build_linux.sh
 bash gpxsolar_linux_build.sh
-# -> dist/gpxsolar + dist/gpxsolar_bundle.zip
+# -> dist/gpxsolar/ (gpxsolar + _internal/)
 ```
-Prérequis : `sudo apt install zip` si absent. Le binaire dépend de la libc de
+Le binaire dépend de la libc de
 la machine de build (build sur Ubuntu 22.04 → tourne sur Ubuntu ≥ 22.04 /
 Debian 12+). Sur Linux, le backend GUI est PyQt6 + WebEngine.
 
@@ -124,9 +128,10 @@ Debian 12+). Sur Linux, le backend GUI est PyQt6 + WebEngine.
 ```bash
 bash setup_build_mac.sh
 bash gpxsolar_mac_build.sh
-# -> dist/GPXSOLAR.app + dist/gpxsolar-macos-arm64.zip (+ SHA256 affiché)
+# -> dist/GPXSOLAR.app + dist/gpxsolar-macos-<arch>.zip (+ SHA256 affiché)
 ```
-Le `.app` n'est pas signé → Gatekeeper bloque au 1er lancement. Contourner :
+Le `.app` est signé ad hoc, pas notarisé : Gatekeeper bloque le premier
+lancement d'une archive téléchargée. Contourner :
 `xattr -dr com.apple.quarantine GPXSOLAR.app`.
 
 ---
@@ -182,13 +187,15 @@ source de vérité des binaires distribués.
 
 ## 5. Détails par étape du build
 
-1. **PyInstaller onedir** → `dist_onedir/gpxsolar/` (exe interne + `_internal/`).
-2. **Compression** du contenu du onedir → `build/gpxsolar_bundle.zip` (structure
-   plate, sans dossier parent).
-3. **PyInstaller launcher** → `dist/gpxsolar(.exe)` (ou `GPXSOLAR.app`).
-4. **Copie** de `gpxsolar_bundle.zip` à côté du launcher (Windows/Linux) ou dans
-   `Contents/Resources/` (macOS). Sur macOS, étape 4 bis : archive `ditto` zippée
-   distribuable + SHA256.
+1. **PyInstaller** → `dist/gpxsolar/` (Windows, Linux : `gpxsolar(.exe)` +
+   `_internal/`), ou `dist/GPXSOLAR.app` (macOS, par `BUNDLE`).
+2. **macOS seulement** : signature ad hoc du `.app` complet, vérifiée, puis
+   archive `ditto` distribuable + SHA256. Rien ne modifie le `.app` après
+   cette signature : jusqu'à la 1.4, le bundle copié après coup dans
+   `Contents/Resources/` rompait son sceau.
+3. **release.yml** : le dossier devient la racine de l'archive
+   (`gpxsolar-<os>-x86_64`), puis `exe_smoke.py` lance le binaire tel qu'il
+   sera publié, avant tout envoi.
 
 ---
 
@@ -196,13 +203,14 @@ source de vérité des binaires distribués.
 
 - **`PyInstaller introuvable`** : le venv `~/.gpxsolar/venv` n'a pas PyInstaller.
   Relance le `setup_build_*` correspondant.
-- **`Bundle introuvable` dans un `*_launcher.spec`** : tu as lancé l'étape 3 sans
-  l'étape 2. Lance le script de build complet, pas le spec launcher seul.
 - **GUI ne s'ouvre pas sous Linux** : backend Qt manquant. `--installer-deps`
   installe `PyQt6 PyQt6-WebEngine qtpy` ; vérifie qu'ils sont dans le venv.
 - **macOS « application endommagée »** : quarantaine Gatekeeper, voir §3.
-- **Extraction concurrente bloquée** : supprime le lockfile
-  `.gpxsolar_extracting` à côté du dossier applicatif, puis relance.
+- **Ancienne extraction toujours présente (Windows)** : la 1.5 la retire à son
+  premier démarrage, sauf si une instance d'une version ≤ 1.4 y tourne
+  encore ; le ménage attend alors le lancement suivant. Pour forcer, fermer
+  toutes les instances de gpxsolar, puis supprimer `%LOCALAPPDATA%\gpxsolar\`
+  (jamais `gpxsolar-data`, qui contient les réglages).
 
 ### Spécifique Linux
 
@@ -216,8 +224,13 @@ source de vérité des binaires distribués.
 ### Spécifique macOS
 
 - **« application endommagée / développeur non identifié »** (Gatekeeper sur
-  `.app` non signé) : `xattr -dr com.apple.quarantine GPXSOLAR.app`, ou
-  clic droit → Ouvrir → Ouvrir quand même.
+  un `.app` signé ad hoc, non notarisé) : `xattr -dr com.apple.quarantine
+  GPXSOLAR.app`, ou clic droit → Ouvrir → Ouvrir quand même.
+- **`PermissionError`, `slice is not valid mach-o`, `.app` qui ne démarre
+  pas** : l'archive a été extraite par un outil qui ne restitue ni les liens
+  symboliques, ni les bits d'exécution, ni les attributs du `.app` (le module
+  `zipfile` de Python, par exemple). Réextraire avec le Finder ou
+  `ditto -x -k gpxsolar-macos-arm64.zip .`.
 - **Écran blanc dans la GUI** : QtWebEngine n'a pas trouvé son helper.
   Vérifier que le build PyInstaller a généré le runtime hook
   (cf. `gpxsolar_mac.spec`, section *Runtime hook*). En dev (script Python
@@ -243,6 +256,7 @@ bootstrap s'exécute à l'import) ; le source des fonctions est extrait via
 python test_gpxsolar.py     # runner intégré, code de sortie != 0 si échec
 pytest test_gpxsolar.py     # équivalent via pytest
 python test_dossiers.py     # dossiers d'état et de sorties (unittest)
+python test_installation.py # ménage de l'ancien lanceur, désinstallation
 ```
 
 `test_dossiers.py` éprouve `_dossiers.py` et son branchement dans
@@ -250,9 +264,15 @@ python test_dossiers.py     # dossiers d'état et de sorties (unittest)
 commande, et un vrai `gpxsolar.py --version` qui ne doit rien créer. Il isole
 toujours ses dossiers : jamais ceux de l'utilisateur.
 
+`test_installation.py` éprouve `_installation.py` sur de vrais fichiers
+temporaires : ménage de ce qu'un lanceur ≤ 1.4 laissait, jamais le dossier
+d'où tourne le programme, et une désinstallation qui ne supprime jamais le
+programme lui-même.
+
 La CI (`.github/workflows/ci.yml`) les exécute sur les 3 OS à chaque push
-touchant `gpxsolar.py`, un module `_*.py`, un des deux fichiers de tests ou
-`deploy.py`.
+touchant `gpxsolar.py`, un module `_*.py`, un des fichiers de tests ou
+`deploy.py`. Le binaire construit, lui, est éprouvé par `exe_smoke.py` dans
+`release.yml`, sur les 4 runners, avant toute publication.
 
 ### Run témoin (validation manuelle de bout en bout)
 

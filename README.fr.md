@@ -67,7 +67,7 @@ Deux façons d'utiliser gpxsolar :
 | **Prérequis** | Python 3.12 | Aucun |
 | **Première install** | ~5 min (bootstrap deps) | Aucun |
 | **Mises à jour** | `git pull` + relance | Télécharger la nouvelle release et la décompresser par-dessus la précédente |
-| **Distribuable** | Non — chaque utilisateur installe Python | Oui — `.exe` / `.app` / binaire Linux + `gpxsolar_bundle.zip` côte à côte |
+| **Distribuable** | Non — chaque utilisateur installe Python | Oui : le dossier extrait, ou `GPXSOLAR.app`, est l'application entière |
 | **Idéal pour** | dev / Linux / contribuer | utilisateur final / distribuer |
 
 ### A. Script Python
@@ -116,10 +116,16 @@ runtime (Python embarqué + dépendances).
 |----|---------|---------------|
 | Windows 10/11 (x86_64) | `gpxsolar-windows-x86_64.zip` | `Expand-Archive` ou double-clic |
 | Linux Ubuntu 24.04+ (x86_64) | `gpxsolar-linux-x86_64.tar.gz` | `tar xzf` |
-| macOS 12+ (Apple Silicon) | `gpxsolar-macos-arm64.zip` | `unzip` puis `xattr -dr com.apple.quarantine GPXSOLAR.app` |
+| macOS 12+ (Apple Silicon) | `gpxsolar-macos-arm64.zip` | Finder (double-clic) ou `ditto -x -k`, puis `xattr -dr com.apple.quarantine GPXSOLAR.app` |
 | macOS 12+ (Intel) | `gpxsolar-macos-x86_64.zip` | idem |
 
-L'archive contient le binaire/launcher et son `gpxsolar_bundle.zip` côte à côte.
+Le dossier extrait est l'application elle-même : `gpxsolar.exe` (Windows) ou
+`gpxsolar` (Linux) à côté du dossier `_internal` dont il a besoin, ou
+`GPXSOLAR.app` sous macOS. Rangez-le où bon vous semble, par exemple dans
+`%LOCALAPPDATA%\Programs` sous Windows, et `GPXSOLAR.app` dans
+`/Applications`. Sous macOS, préférez le Finder ou `ditto` aux autres outils de
+décompression : l'application contient des liens symboliques qui doivent
+survivre à l'extraction.
 
 **Option b — Builder soi-même.** Un script de setup machine (à faire **une fois**)
 puis un script de build (à relancer à chaque mise à jour de `gpxsolar.py`).
@@ -129,7 +135,7 @@ puis un script de build (à relancer à chaque mise à jour de `gpxsolar.py`).
 git clone https://github.com/nico579/gpxsolar
 cd gpxsolar
 .\setup_build_windows.ps1     # 1. Setup : Python 3.12, deps, PyInstaller
-.\gpxsolar_win_build.ps1      # 2. Build -> dist\gpxsolar.exe + dist\gpxsolar_bundle.zip
+.\gpxsolar_win_build.ps1      # 2. Build -> dist\gpxsolar\ (gpxsolar.exe + _internal\)
 ```
 
 ##### macOS (Apple Silicon ou Intel)
@@ -150,11 +156,11 @@ le nom `_win` est trompeur).
 git clone https://github.com/nico579/gpxsolar
 cd gpxsolar
 bash setup_build_linux.sh       # 1. Setup
-bash gpxsolar_linux_build.sh    # 2. Build -> dist/gpxsolar + dist/gpxsolar_bundle.zip
+bash gpxsolar_linux_build.sh    # 2. Build -> dist/gpxsolar/ (gpxsolar + _internal/)
 ```
 
-Documentation complète du build (architecture du bundle, mise à jour sans rebuild,
-dépannage) : **[BUILD.md](BUILD.md)**.
+Documentation complète du build (empaquetage, releases, dépannage) :
+**[BUILD.md](BUILD.md)**.
 
 #### 2. Lancer le livrable
 
@@ -164,13 +170,20 @@ dépannage) : **[BUILD.md](BUILD.md)**.
 | Linux | `chmod +x gpxsolar && ./gpxsolar` dans le dossier extrait |
 | macOS | Double-clic sur `GPXSOLAR.app`. 1er lancement bloqué par Gatekeeper : `xattr -dr com.apple.quarantine GPXSOLAR.app` puis double-clic |
 
-Le premier lancement extrait le bundle (~20-30 s, une fois — il contient Qt) dans :
+Le programme démarre directement depuis le dossier extrait, sans rien
+décompresser au préalable. Jusqu'à la version 1.4, un lanceur l'extrayait au
+premier lancement, en 20 à 30 secondes, dans une seconde copie :
 - Windows : `%LOCALAPPDATA%\gpxsolar\`
 - macOS : `~/Library/Application Support/gpxsolar/`
 - Linux : `~/.local/share/gpxsolar/`
 
-Désinstallation propre : `gpxsolar(.exe) --desinstaller` (supprime le bundle
-extrait + le venv).
+La version 1.5 supprime cette copie à son premier démarrage, ainsi que le
+`gpxsolar_bundle.zip` que l'ancien lanceur laisse à côté du programme quand on
+décompresse la nouvelle archive par-dessus l'ancienne.
+
+Désinstallation propre : `gpxsolar(.exe) --desinstaller` supprime le venv de
+l'installation depuis les sources et, s'il en reste, la copie extraite par
+l'ancien lanceur ; jamais le programme lui-même, vos réglages ni vos sorties.
 
 ### Où gpxsolar range ses fichiers
 
@@ -381,7 +394,7 @@ foncé = raide) :
 ## Documentation
 
 - **README utilisateur** : ce fichier
-- **Build & déploiement** : [BUILD.md](BUILD.md) — architecture du bundle, scripts par OS, mise à jour sans rebuild, dépannage (incluant cas spécifiques Linux et macOS)
+- **Build & déploiement** : [BUILD.md](BUILD.md) — empaquetage, scripts par OS, releases, dépannage (incluant cas spécifiques Linux et macOS)
 - **Aide intégrée** : `python gpxsolar.py --help`
 
 ## Licence

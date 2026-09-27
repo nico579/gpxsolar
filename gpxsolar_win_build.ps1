@@ -1,10 +1,13 @@
-# gpxsolar_win_build.ps1 — Build complet du launcher gpxsolar.exe
+# gpxsolar_win_build.ps1 : build de gpxsolar.exe (PyInstaller onedir)
 #
-# 3 étapes :
-#   1. PyInstaller onedir         -> dist_onedir/gpxsolar/    (la vraie app)
-#   2. Compress-Archive (zip)     -> build/gpxsolar_bundle.zip
-#   3. PyInstaller launcher       -> dist/gpxsolar.exe        (launcher léger)
-#      + copie gpxsolar_bundle.zip à côté du .exe
+# Une seule passe PyInstaller -> dist/gpxsolar/ (gpxsolar.exe + _internal/),
+# le programme tel qu'il est livré. release.yml archive ensuite ce dossier.
+#
+# Jusqu'à la 1.4, deux passes de plus zippaient ce dossier et construisaient
+# un lanceur onefile qui l'extrayait dans %LOCALAPPDATA% au premier
+# lancement : deux exemplaires sur disque, et une extraction à attendre après
+# chaque mise à jour. Depuis la 1.5, le dossier est livré tel quel, comme
+# ceux de lidar2map, blink2video et watch2notif.
 #
 # Usage :
 #   PowerShell -ExecutionPolicy Bypass -File gpxsolar_win_build.ps1
@@ -13,71 +16,27 @@ $root  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venv  = Join-Path $env:USERPROFILE ".gpxsolar\venv"
 $pyi   = Join-Path $venv "Scripts\pyinstaller.exe"
 
-$onedirOut   = "$root\dist_onedir"
-$bundleZip   = "$root\build\gpxsolar_bundle.zip"
-$finalOut    = "$root\dist"
-$finalExe    = "$finalOut\gpxsolar.exe"
-$finalZip    = "$finalOut\gpxsolar_bundle.zip"   # zip à côté du .exe
+$distOut = "$root\dist"
+$appRoot = "$distOut\gpxsolar"
 
 if (-not (Test-Path $pyi)) {
     throw "PyInstaller introuvable : $pyi`n  Lance d'abord : .\setup_build_windows.ps1"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. PyInstaller onedir (la vraie app)
-# ─────────────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "[1/3] PyInstaller onedir (gpxsolar_win.spec)..." -ForegroundColor Cyan
+Write-Host "PyInstaller onedir (gpxsolar_win.spec)..." -ForegroundColor Cyan
 $out = & $pyi "$root\gpxsolar_win.spec" `
     --noconfirm --clean `
-    --distpath $onedirOut `
+    --distpath $distOut `
     --workpath "$root\build" 2>&1 | Out-String
 if ($LASTEXITCODE -ne 0) { Write-Host $out; throw "PyInstaller onedir a echoue" }
 ($out -split "`n")[-4..-1] | ForEach-Object { "    $_" }
 
-$onedirRoot = "$onedirOut\gpxsolar"
-if (-not (Test-Path "$onedirRoot\gpxsolar.exe")) {
-    throw "$onedirRoot\gpxsolar.exe introuvable apres build"
+if (-not (Test-Path "$appRoot\gpxsolar.exe")) {
+    throw "$appRoot\gpxsolar.exe introuvable apres build"
 }
-$onedirSize = (Get-ChildItem $onedirRoot -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
-Write-Host ("    Onedir : {0:N1} Mo" -f $onedirSize)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Zip du onedir (contenu sans dossier parent — structure plate)
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "[2/3] Compression onedir -> bundle.zip..." -ForegroundColor Cyan
-if (Test-Path $bundleZip) { Remove-Item $bundleZip }
-New-Item -ItemType Directory -Force -Path (Split-Path $bundleZip) | Out-Null
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
-Compress-Archive -Path "$onedirRoot\*" -DestinationPath $bundleZip -CompressionLevel Optimal -Force
-$sw.Stop()
-$bundleSize = (Get-Item $bundleZip).Length / 1MB
-Write-Host ("    Bundle : {0:N1} Mo en {1:N1}s" -f $bundleSize, $sw.Elapsed.TotalSeconds)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. PyInstaller launcher (léger — sans bundle embarqué)
-# ─────────────────────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "[3/3] PyInstaller launcher (gpxsolar_win_launcher.spec)..." -ForegroundColor Cyan
-$out = & $pyi "$root\gpxsolar_win_launcher.spec" `
-    --noconfirm --clean `
-    --distpath $finalOut `
-    --workpath "$root\build" 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0) { Write-Host $out; throw "PyInstaller launcher a echoue" }
-($out -split "`n")[-4..-1] | ForEach-Object { "    $_" }
-
-if (-not (Test-Path $finalExe)) { throw "$finalExe introuvable apres build" }
-
-# Copier le zip à côté du .exe → remplaçable sans rebuilder
-Copy-Item $bundleZip $finalZip -Force
-Write-Host "    Bundle copie : $finalZip"
-
-$finalSize    = (Get-Item $finalExe).Length / 1MB
-$finalZipSize = (Get-Item $finalZip).Length / 1MB
+$appSize = (Get-ChildItem $appRoot -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 
 Write-Host ""
 Write-Host "=== BUILD TERMINE ===" -ForegroundColor Green
-Write-Host "  Livrables :" -ForegroundColor Green
-Write-Host ("    $finalExe  ({0:N1} Mo)" -f $finalSize)
-Write-Host ("    $finalZip  ({0:N1} Mo)" -f $finalZipSize)
+Write-Host ("  $appRoot  ({0:N1} Mo)" -f $appSize)

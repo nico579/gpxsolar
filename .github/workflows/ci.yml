@@ -6,6 +6,8 @@ on:
       - 'gpxsolar.py'
       - 'test_gpxsolar.py'
       - 'test_dossiers.py'
+      - 'test_installation.py'
+      - 'exe_smoke.py'
       - '_*.py'
       - 'deploy.py'
       - 'smoke_gpxsolar.py'
@@ -16,6 +18,8 @@ on:
       - 'gpxsolar.py'
       - 'test_gpxsolar.py'
       - 'test_dossiers.py'
+      - 'test_installation.py'
+      - 'exe_smoke.py'
       - '_*.py'
       - 'deploy.py'
       - 'smoke_gpxsolar.py'
@@ -113,9 +117,14 @@ jobs:
         # Extraction ast des fonctions pures, pas d'import du module : ne
         # dépend que de numpy (déjà installé ci-dessus). Couvre bilinéaire,
         # antiméridien, clé du cache solaire, moteur de ray-tracing (chunké
-        # vs référence point à point), géométrie des rayons KML et verrou
-        # d'extraction du lanceur (refus passagers de Windows compris).
+        # vs référence point à point) et géométrie des rayons KML.
         run: python test_gpxsolar.py
+
+      - name: Installation et ménage de l'ancien lanceur (test_installation.py)
+        # Depuis la 1.5, le programme est livré tel quel : ce qu'un lanceur
+        # <= 1.4 laissait est retiré au démarrage, jamais le dossier d'où
+        # tourne le programme, et --desinstaller ne supprime jamais celui-ci.
+        run: python test_installation.py
 
       - name: Dossiers d'état et de sorties (test_dossiers.py)
         # Reprise unique de l'état d'une version <= 1.3, chemins de la ligne

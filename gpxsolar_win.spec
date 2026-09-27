@@ -6,9 +6,9 @@ Usage :
     %USERPROFILE%\\.gpxsolar\\venv\\Scripts\\pyinstaller.exe gpxsolar_win.spec --clean --noconfirm   (Windows)
     ~/.gpxsolar/venv/bin/pyinstaller gpxsolar_win.spec --clean --noconfirm                            (Linux)
 
-Résultat :
-    dist_onedir/gpxsolar/gpxsolar(.exe)
-    dist_onedir/gpxsolar/_internal/
+Résultat (le programme livré tel quel depuis la 1.5.0) :
+    dist/gpxsolar/gpxsolar(.exe)
+    dist/gpxsolar/_internal/
         gpxsolar.py          (livré en clair, exécuté par _loader.py)
         pyproj/, rasterio/, ...
 
@@ -16,8 +16,8 @@ Architecture (miroir lidar2map) :
   - Entry point = _loader.py (ne change jamais), qui exécute _internal/gpxsolar.py.
   - 2 passes Analysis : passe 1 détecte les imports de gpxsolar.py, passe 2
     construit depuis _loader.py. Fusion des TOC après coup.
-  - Ce build onedir est ensuite zippé en bundle (gpxsolar_win_build.ps1 /
-    gpxsolar_linux_build.sh), bundle placé À CÔTÉ du launcher (pas embarqué).
+  - release.yml fait de ce dossier la racine de l'archive publiée. Jusqu'à la
+    1.4, il était zippé dans un bundle qu'un lanceur extrayait.
 
 Cette spec sert AUSSI pour Linux (le nom _win est trompeur — PyInstaller
 produit un ELF sous Linux) :

@@ -49,318 +49,47 @@ for _std in ("stdout", "stderr"):
             pass
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODE LAUNCHER (build onefile)
+# PROGRAMME LIVRÉ TEL QUEL (1.5.0)
 # ─────────────────────────────────────────────────────────────────────────────
-# Le même gpxsolar.py est buildé en DEUX versions :
-#   1) onedir (gpxsolar.spec)        : la vraie app, lourde (numpy, scipy,
-#      rasterio, pywebview, etc.). C'est ce qui tourne au final.
-#   2) onefile (gpxsolar_launcher.spec) : un petit launcher qui contient le
-#      onedir zippé en ressource. À l'exécution il extrait dans
-#      %LOCALAPPDATA%\gpxsolar (avec contrôle SHA pour détecter les mises à
-#      jour), puis spawn le vrai exe avec une sentinelle pour qu'il saute ce
-#      bloc.
-#
-# cwd : le launcher passe son propre dossier comme cwd au subprocess, de sorte
-# que les fichiers cwd-relatifs (gpx_analyzer_history.json, GPX_Ombres/, …)
-# soient créés à côté de l'exe lanceur, pas dans %LOCALAPPDATA%\gpxsolar.
-_INNER_FLAG = "--__gpxsolar_inner__"
-if getattr(sys, "frozen", False):
-    if _INNER_FLAG in sys.argv:
-        # On est l'exe interne : retirer la sentinelle puis continuer normalement
-        sys.argv.remove(_INNER_FLAG)
-    else:
-        # On est peut-être le launcher : chercher le bundle.
-        import hashlib, zipfile
-        _exe = Path(sys.executable).resolve()
-        _sys = platform.system()
+# Jusqu'à la 1.4, un petit lanceur contenait le programme zippé, l'extrayait
+# dans le dossier de données de l'OS (%LOCALAPPDATA%\gpxsolar, etc.), puis le
+# lançait depuis son propre dossier : deux exemplaires sur disque, et une
+# extraction à attendre après chaque mise à jour. Depuis la 1.5, l'archive
+# livre directement le programme (dossier onedir, ou GPXSOLAR.app sous macOS),
+# comme celles de lidar2map, blink2video et watch2notif (voir _installation.py).
+import _installation
 
-        # Ordre de recherche du bundle (archi lidar2map) :
-        #   1. À côté de l'exe / dans Contents/Resources/ (bundle fichier séparé)
-        #   2. Dans sys._MEIPASS (bundle embarqué — fallback ancienne archi)
-        if _sys == "Darwin" and ".app" in str(_exe):
-            _bundle = _exe.parent.parent / "Resources" / "gpxsolar_bundle.zip"
-        else:
-            _bundle = _exe.parent / "gpxsolar_bundle.zip"
-        if not _bundle.exists():
-            _meipass_str = getattr(sys, "_MEIPASS", None)
-            if _meipass_str:
-                _bundle = Path(_meipass_str) / "gpxsolar_bundle.zip"
+# --desinstaller, avant tout bootstrap : les sources ne doivent pas créer un
+# venv pour le supprimer aussitôt. Jusqu'à la 1.4, seul le lanceur le
+# traitait ; il vaut désormais aussi pour les sources.
+if "--desinstaller" in sys.argv:
+    sys.exit(0 if _installation.desinstaller(
+        systeme=platform.system(), home=Path.home(),
+        localappdata=os.environ.get("LOCALAPPDATA"),
+        executable=sys.executable if getattr(sys, "frozen", False) else None,
+    ) else 1)
 
-        if _bundle.exists():
-            # Dossier d'extraction : chemins système standard par OS.
-            if _sys == "Windows":
-                _app_dir   = Path(os.environ.get("LOCALAPPDATA",
-                                str(Path.home() / "AppData" / "Local"))) / "gpxsolar"
-                _inner_exe = _app_dir / "gpxsolar.exe"
-            elif _sys == "Darwin":
-                _app_dir   = Path.home() / "Library" / "Application Support" / "gpxsolar"
-                _inner_exe = _app_dir / "gpxsolar"
-            else:
-                _app_dir   = Path.home() / ".local" / "share" / "gpxsolar"
-                _inner_exe = _app_dir / "gpxsolar"
-            _sha_file = _app_dir / ".bundle_sha"
-            _lock     = _app_dir.parent / ".gpxsolar_extracting"
-
-            # ── --desinstaller intercepté dans le launcher ────────────────────
-            # Traité ici AVANT tout calcul de SHA. Le launcher supprime tout
-            # directement (venv, bundle extrait) sans re-spawner.
-            if "--desinstaller" in sys.argv:
-                import shutil as _sh_u
-                _gpx_home = Path.home() / ".gpxsolar"
-                _cibles_u = [
-                    (_app_dir,            "bundle extrait"),
-                    (_gpx_home / "venv",  "venv Python"),
-                ]
-                print()
-                print("  ── gpxsolar uninstall ───────────────────────────────────")
-                print()
-                _total_u = 0
-                for _c_u, _label_u in _cibles_u:
-                    if _c_u.exists():
-                        _taille_u = sum(
-                            f.stat().st_size for f in _c_u.rglob("*") if f.is_file())
-                        _total_u += _taille_u
-                        print(f"  Suppression {_label_u} ({_taille_u / 1e6:.0f} MB)")
-                        print(f"    {_c_u}")
-                        _sh_u.rmtree(_c_u, ignore_errors=True)
-                        print(f"    {'✓ removed' if not _c_u.exists() else '⚠ partial'}")
-                    else:
-                        print(f"  {_label_u} : absent ({_c_u})")
-                print()
-                print(f"  {_total_u / 1e6:.0f} MB freed.")
-                print()
-                print("  Note: gpxsolar.py, the exe/.app and the zip are not removed.")
-                print("  Remove them manually if needed.")
-                sys.exit(0)
-
-            def _bundle_sha():
-                h = hashlib.sha256()
-                with open(_bundle, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b""):
-                        h.update(chunk)
-                return h.hexdigest()
-
-            # ── Détection de mise à jour avec cache mtime ─────────────────────
-            # Le SHA256 d'un zip de plusieurs centaines de Mo prend ~0.5-1 s à
-            # chaque lancement. On mémorise le mtime du bundle dans _sha_file
-            # ("sha256hex\nmtime_float") pour éviter ce calcul quand rien n'a
-            # changé.
-            _need_extract = True
-            if _sha_file.exists() and _inner_exe.exists() and not _inner_exe.is_dir():
-                try:
-                    _sha_lines     = _sha_file.read_text(encoding="utf-8").strip().split("\n")
-                    _saved_sha     = _sha_lines[0]
-                    _saved_mtime   = float(_sha_lines[1]) if len(_sha_lines) > 1 else 0.0
-                    _current_mtime = _bundle.stat().st_mtime
-                    if abs(_current_mtime - _saved_mtime) < 0.01:
-                        _need_extract = False
-                    else:
-                        _expected_sha = _bundle_sha()
-                        _need_extract = (_expected_sha != _saved_sha)
-                except Exception:
-                    _need_extract = True   # _sha_file corrompu → ré-extraire
-            if _need_extract:
-                _expected_sha = _bundle_sha()   # calcul SHA si pas encore fait
-
-            # Si le zip a été créé avec --keepParent, l'extraction crée un
-            # sous-dossier gpxsolar/ → l'exe est un niveau plus bas. On corrige.
-            def _resolve_exe(exe):
-                if exe.exists() and exe.is_dir():
-                    deeper = exe / exe.name
-                    if deeper.exists() and not deeper.is_dir():
-                        return deeper
-                return exe
-
-            if _need_extract:
-                import time as _time
-                # Lockfile contre les extractions simultanées (double-clic).
-                # Prise de verrou ATOMIQUE via os.open(O_CREAT|O_EXCL) : une
-                # seule instance peut créer le fichier, les autres basculent en
-                # attente. Remplace l'ancien check-then-act (exists() puis
-                # touch()) où deux double-clics voyaient tous deux « pas de
-                # lock », le créaient chacun, puis extrayaient en parallèle
-                # (course corrigée d'abord chez le jumeau lidar2map).
-                # Durci contre les locks ORPHELINS : si le lock est plus vieux
-                # que _LOCK_STALE_S (instance tuée/plantée pendant l'extraction),
-                # on le considère périmé et on le retire au lieu d'attendre 60 s
-                # puis d'échouer. L'extraction du bundle prend ~30 s -> 300 s est
-                # une borne haute sûre (pas de faux positif en cas de double-clic).
-                _LOCK_STALE_S = 300
-                _app_dir.parent.mkdir(parents=True, exist_ok=True)
-
-                def _prendre_lock():
-                    # True si on crée le verrou (on extrait), False s'il existe
-                    # déjà (une autre instance l'a pris avant nous).
-                    try:
-                        _fd = os.open(str(_lock),
-                                      os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                        os.close(_fd)
-                        return True
-                    except FileExistsError:
-                        return False
-                    except PermissionError:
-                        # Windows : un verrou que l'autre instance vient de
-                        # supprimer, mais qu'un antivirus tient encore ouvert,
-                        # reste « en attente de suppression » ; le recréer est
-                        # refusé au lieu de lever FileExistsError. Il est donc
-                        # encore pris, pour un instant : l'attente ci-dessous le
-                        # verra disparaître. Ailleurs, c'est un vrai refus.
-                        if os.name != "nt":
-                            raise
-                        return False
-
-                def _retirer_lock():
-                    # Même antivirus, côté suppression : sous Windows, unlink()
-                    # échoue (PermissionError) tant qu'il tient le fichier.
-                    # Quelques essais rapprochés, puis on renonce sans planter :
-                    # un verrou resté en place coûte une attente au lancement
-                    # suivant, jamais une installation réussie.
-                    for _essai in range(10):
-                        try:
-                            _lock.unlink(missing_ok=True)
-                            return
-                        except PermissionError:
-                            _time.sleep(0.05)
-
-                _lock_pris = _prendre_lock()
-                if not _lock_pris:
-                    # Verrou déjà présent : périmé (instance morte) ? Si oui,
-                    # nettoyer puis retenter la prise atomique une fois.
-                    _stale = False
-                    try:
-                        _stale = (_time.time() - _lock.stat().st_mtime) >= _LOCK_STALE_S
-                    except Exception:
-                        _stale = True
-                    if _stale:
-                        print("  Stale lockfile detected - cleaning up and resuming.", flush=True)
-                        _retirer_lock()
-                        _lock_pris = _prendre_lock()
-                if not _lock_pris:
-                    print("Installation in progress in another instance - waiting...",
-                          flush=True)
-                    for _ in range(60):
-                        _time.sleep(1)
-                        if not _lock.exists():
-                            break
-                    _inner_check = _resolve_exe(_inner_exe)
-                    if _inner_check.exists() and _sha_file.exists():
-                        _need_extract = False
-                    else:
-                        print("  ⚠ Concurrent install incomplete or failed.",
-                              flush=True)
-                        print(f"  Remove the lockfile and relaunch: {_lock}", flush=True)
-                        sys.exit(1)
-                else:
-                    try:
-                        if _app_dir.exists():
-                            import shutil as _sh
-                            _sh.rmtree(_app_dir, ignore_errors=True)
-                        _app_dir.mkdir(parents=True, exist_ok=True)
-                        _bundle_size = _bundle.stat().st_size
-                        print(f"First launch - installation ({_bundle_size // 1_000_000} MB)...",
-                              flush=True)
-                        # ditto (Mac) préserve le bit +x ; zipfile (Linux/fallback)
-                        # le perd → on réapplique les permissions POSIX après coup.
-                        _used_zipfile = False
-                        if _sys == "Darwin":
-                            import subprocess as _sp_d
-                            _r = _sp_d.run(["ditto", "-x", "-k",
-                                            str(_bundle), str(_app_dir)],
-                                           capture_output=True)
-                            if _r.returncode != 0:
-                                with zipfile.ZipFile(_bundle) as _z:
-                                    _t = Path(_app_dir).resolve()
-                                    for _mem in _z.infolist():
-                                        if _mem.filename.startswith(("/", "\\")) \
-                                                or ":" in _mem.filename[:3]:
-                                            raise ValueError(
-                                                f"Bundle suspect : {_mem.filename!r}")
-                                        _d = (_t / _mem.filename).resolve()
-                                        if _d != _t and _t not in _d.parents:
-                                            raise ValueError(
-                                                f"Bundle suspect : {_mem.filename!r}")
-                                    _z.extractall(_app_dir)
-                                _used_zipfile = True
-                            _sp_d.run(["xattr", "-dr", "com.apple.quarantine",
-                                       str(_app_dir)], capture_output=True)
-                        else:
-                            with zipfile.ZipFile(_bundle) as _z:
-                                _members = _z.infolist()
-                                _n = len(_members)
-                                _t = Path(_app_dir).resolve()
-                                for _mem in _members:
-                                    if _mem.filename.startswith(("/", "\\")) \
-                                            or ":" in _mem.filename[:3]:
-                                        raise ValueError(
-                                            f"Bundle suspect : {_mem.filename!r}")
-                                    _d = (_t / _mem.filename).resolve()
-                                    if _d != _t and _t not in _d.parents:
-                                        raise ValueError(
-                                            f"Bundle suspect : {_mem.filename!r}")
-                                for _i, _m in enumerate(_members, 1):
-                                    _z.extract(_m, _app_dir)
-                                    _mode = (_m.external_attr >> 16) & 0xFFFF
-                                    if _mode and _sys != "Windows":
-                                        try:
-                                            (Path(_app_dir) / _m.filename).chmod(_mode & 0o777)
-                                        except Exception:
-                                            pass
-                                    if _i % max(1, _n // 20) == 0:
-                                        print(f"  {_i * 100 // _n}%",
-                                              end="\r", flush=True)
-                            print("  100%", flush=True)
-                            _used_zipfile = True
-
-                        # Filet de sécurité : zip sans permissions POSIX
-                        # (external_attr == 0, ex: créé sous Windows) → forcer +x
-                        # sur l'exe interne pour qu'il puisse être spawné.
-                        if _used_zipfile and _sys != "Windows":
-                            import stat as _stat
-                            _inner_exe_resolved = _resolve_exe(_inner_exe)
-                            if _inner_exe_resolved.exists():
-                                _inner_exe_resolved.chmod(
-                                    _inner_exe_resolved.stat().st_mode
-                                    | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH)
-
-                        _inner_resolved = _resolve_exe(_inner_exe)
-                        if not _inner_resolved.exists():
-                            raise RuntimeError(
-                                f"Extraction incomplète : {_inner_exe} introuvable")
-                        _sha_file.write_text(
-                            f"{_expected_sha}\n{_bundle.stat().st_mtime}",
-                            encoding="utf-8")
-                        print("Installation complete.", flush=True)
-                    except Exception as _e_extract:
-                        print(f"\n  ⚠ Extraction error: {_e_extract}", flush=True)
-                        print("  Restart the application to try again.", flush=True)
-                        sys.exit(1)
-                    finally:
-                        _retirer_lock()
-
-            _inner_exe = _resolve_exe(_inner_exe)
-
-            # cwd = dossier contenant le launcher (ou parent du .app sur Mac).
-            # Jusqu'à la 1.3, l'état et les sorties y étaient créés ; depuis la
-            # 1.4.0, main() n'y cherche plus que cet ancien état, qu'il reprend
-            # une fois, puis passe au dossier des sorties (voir _dossiers.py).
-            if _sys == "Darwin" and ".app" in str(_exe):
-                _work_dir = _exe.parent.parent.parent.parent
-            else:
-                _work_dir = _exe.parent
-
-            _rc = subprocess.call(
-                [str(_inner_exe), _INNER_FLAG] + sys.argv[1:],
-                cwd=str(_work_dir),
-            )
-            sys.exit(_rc)
-        # Pas de bundle.zip → exe onedir lancé directement → continuer.
+# Ce qu'un ancien lanceur a laissé sur disque est retiré au lancement du
+# programme figé, jamais dans le sous-processus d'analyse de l'interface
+# (GPXSOLAR_CHILD) ni à un simple import. Jamais bloquant : un échec laisse
+# les restes en place pour le lancement suivant.
+if (getattr(sys, "frozen", False) and __name__ == "__main__"
+        and os.environ.get("GPXSOLAR_CHILD") != "1"):
+    try:
+        for _reste in _installation.nettoyer_ancienne_extraction(
+                systeme=platform.system(), home=Path.home(),
+                localappdata=os.environ.get("LOCALAPPDATA"),
+                executable=sys.executable):
+            print(f"  Removed what the former launcher left: {_reste}")
+    except OSError as _exc:
+        print(f"  Cleanup of the former launcher's files postponed ({_exc}).")
 
 
 # Version applicative — SOURCE UNIQUE : utilisée par --version, par le titre
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.4.0"
+VERSION      = "1.5.0"
 VERSION_DATE = "2026-09"
 
 
@@ -786,8 +515,8 @@ from datetime import datetime, timedelta
 from collections import OrderedDict
 
 # Modules du projet (bibliothèque standard seulement) : dossiers d'état et de
-# sorties depuis la 1.4.0. Importés après le bloc du lanceur, qui n'en a pas
-# besoin ; la passe 1 des specs les embarque dans le bundle.
+# sorties depuis la 1.4.0. Importés après le bootstrap, qui n'en a pas
+# besoin ; la passe 1 des specs les embarque dans le programme.
 import _atomic_files
 import _dossiers
 
@@ -1371,8 +1100,8 @@ def _kill_process_tree(proc) -> None:
 
 def _headless_base_cmd() -> list:
     """Commande de base pour relancer CE programme en mode headless.
-    Frozen (PyInstaller) : l'exe lui-même reçoit les arguments (le launcher
-    _loader.py les forwarde). Dev : python + le script."""
+    Frozen (PyInstaller) : l'exe lui-même reçoit les arguments (son point
+    d'entrée _loader.py les transmet). Dev : python + le script."""
     if getattr(sys, "frozen", False):
         return [sys.executable]
     return [sys.executable, os.path.abspath(__file__)]
@@ -5890,9 +5619,12 @@ def _preparer_dossiers(args):
     """Dossiers de la 1.4.0 (voir _dossiers.py), au lancement du programme et
     jamais à un simple import.
 
-    Reprend une fois l'état qu'une version <= 1.3 rangeait dans le dossier
+    Reprend une fois l'état qu'une version <= 1.3 rangeait dans son dossier
     courant, puis fait du dossier des sorties le dossier courant : GPX_Ombres
     et les caches, que le code désigne par des chemins relatifs, y tombent.
+    Ce dossier courant d'avant était celui où le lanceur lançait le
+    programme figé, c'est-à-dire le dossier du programme (voir
+    _installation.dossier_programme) ; pour les sources, le dossier courant.
     Les chemins donnés sur la ligne de commande sont d'abord rendus absolus,
     pour rester relatifs au dossier d'où l'on a lancé gpxsolar, comme avant.
     Le sous-processus d'analyse de l'interface (GPXSOLAR_CHILD=1) hérite déjà
@@ -5904,14 +5636,18 @@ def _preparer_dossiers(args):
         valeur = getattr(args, nom, None)
         if valeur and valeur != defaut:
             setattr(args, nom, str((depart / valeur).resolve()))
+    # Sans lanceur depuis la 1.5, un programme lancé du Finder part de « / »,
+    # d'un raccourci de n'importe où : l'ancien état se cherche où il était.
+    ancien = (_installation.dossier_programme(sys.executable)
+              if getattr(sys, "frozen", False) else depart)
     if os.environ.get("GPXSOLAR_CHILD") != "1":
         try:
-            repris = _dossiers.preparer_etat(depart, version=VERSION)
+            repris = _dossiers.preparer_etat(ancien, version=VERSION)
         except (OSError, TimeoutError) as exc:
             logging.warning(f"State migration postponed ({exc}).")
         else:
             if repris:
-                logging.info(f"State moved from {depart} to {DOSSIER_ETAT}: "
+                logging.info(f"State moved from {ancien} to {DOSSIER_ETAT}: "
                              f"{', '.join(repris)}.")
     DOSSIER_ETAT.mkdir(parents=True, exist_ok=True)
     sorties = _dossiers.dossier_sorties(DOSSIER_ETAT)
