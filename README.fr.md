@@ -73,8 +73,8 @@ Deux façons d'utiliser gpxsolar :
 ### A. Script Python
 
 Au premier lancement, le script crée `~/.gpxsolar/venv` et y installe ses
-dépendances (numpy, pyproj, rasterio, shapely, pysolar, pywebview + PyQt6/QtWebEngine,
-simplekml, timezonefinder, gpxpy, pandas…). ~300-400 Mo, **une seule fois**.
+dépendances (numpy, pyproj, rasterio, shapely, pysolar, pystray, simplekml,
+timezonefinder, gpxpy, pandas…). Quelques centaines de Mo, **une seule fois**.
 
 #### Windows 10+
 ```powershell
@@ -170,6 +170,7 @@ Documentation complète du build (empaquetage, releases, dépannage) :
 | Linux | `chmod +x gpxsolar && ./gpxsolar` dans le dossier extrait |
 | macOS | Double-clic sur `GPXSOLAR.app`. 1er lancement bloqué par Gatekeeper : `xattr -dr com.apple.quarantine GPXSOLAR.app` puis double-clic |
 
+L'interface s'ouvre dans votre navigateur (voir [Utilisation](#utilisation)).
 Le programme démarre directement depuis le dossier extrait, sans rien
 décompresser au préalable. Jusqu'à la version 1.4, un lanceur l'extrayait au
 premier lancement, en 20 à 30 secondes, dans une seconde copie :
@@ -210,11 +211,11 @@ par exemple), faites pointer la variable d'environnement `GPXSOLAR_HOME` dessus.
 Deux modes, sélectionnés automatiquement selon les arguments (même logique que
 le projet jumeau [lidar2map](https://github.com/nico579/lidar2map)) :
 
-- **Sans argument → interface graphique** (pywebview). Mode courant.
-- **Avec arguments → calcul en ligne de commande** (headless, sans fenêtre).
+- **Sans argument → interface dans le navigateur**. Mode courant.
+- **Avec arguments → calcul en ligne de commande** (headless, sans interface).
   Pratique pour scripter, lancer sur un serveur, ou reproduire un rendu précis.
 
-### Mode interface graphique (sans argument)
+### Mode interface (sans argument)
 
 | Plateforme | Lancer |
 |---|---|
@@ -223,8 +224,15 @@ le projet jumeau [lidar2map](https://github.com/nico579/lidar2map)) :
 | **macOS** | double-clic sur **`GPXSOLAR.app`** |
 | Script (dev) | `python gpxsolar.py` |
 
-Puis dans la fenêtre :
-1. Choisissez un fichier **GPX**.
+Depuis la 1.6.0, l'interface s'ouvre dans votre navigateur, à l'adresse
+`http://127.0.0.1:8768/`, comme celles de lidar2map et blink2video : gpxsolar
+la sert lui-même, sur votre machine seulement. Une icône apparaît dans la zone
+de notification (la barre des menus sous macOS) pour la rouvrir, redémarrer ou
+arrêter gpxsolar. Jusqu'à la 1.5, elle s'affichait dans une fenêtre Qt, qui
+pesait à elle seule plus de la moitié du programme.
+
+Puis dans la page :
+1. Choisissez un fichier **GPX** (le bouton « … » parcourt vos dossiers).
 2. Sélectionnez **date** et **heure de départ**.
 3. Choisissez une **source d'altitude** : SRTM/Copernicus (mondial), IGN ALTI
    (France), IGN LiDAR HD (France, MNT/MNS/MNH).
@@ -232,9 +240,16 @@ Puis dans la fenêtre :
    réglez les options (type d'ombre, végétation, résolution d'analyse).
 5. **Lancez le calcul** → KML/KMZ + CSV.
 
+Relancer gpxsolar alors qu'il tourne déjà rouvre simplement la page. Pour un
+calcul en parallèle, choisissez « Nouvelle instance » : un second serveur
+démarre sur le port suivant. Options du mode interface : `--serve-gui` suivi
+de `--port N` (port de départ, 8768 par défaut), `--no-browser`, `--no-tray`
+ou `--new-instance` ; voir `gpxsolar --serve-gui --help`.
+
 ### Mode ligne de commande (headless)
 
-Dès qu'on passe un argument, gpxsolar calcule **sans ouvrir de fenêtre** et écrit
+Dès qu'on passe un argument (autre que `--serve-gui`), gpxsolar calcule
+**sans ouvrir l'interface** et écrit
 les sorties dans `Documents/gpxsolar/GPX_Ombres/` (KMZ / MBTiles / KML selon les options — voir
 [Fichiers de sortie](#fichiers-de-sortie--superposition-smartphone)), plus le CSV. Le minimum requis est
 `--gpx` + `--date` (JJ/MM/AAAA) + `--time` (HH:MM). Tout ce qui suit vaut pour le
@@ -366,7 +381,7 @@ portée balaie le versant à mesure que le soleil tourne.
 
 ### Interface graphique
 
-Formulaire pywebview : choix du GPX, date et heure de départ, source d'altitude
+Formulaire dans le navigateur : choix du GPX, date et heure de départ, source d'altitude
 (SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), type d'analyse (soleil/ombre ou
 pente), type d'ombre et options. En mode pente, les champs liés à l'ombre sont masqués.
 
@@ -414,4 +429,4 @@ Données et outils :
 - **NASA / USGS** — SRTM ; **Copernicus** — DEM GLO-30
 - **ESA WorldCover** — couverture du sol / végétation
 - Bibliothèques : pysolar, pyproj, rasterio, shapely, numpy, pandas, gpxpy,
-  simplekml, timezonefinder, pywebview, Pillow, numba.
+  simplekml, timezonefinder, pystray, Pillow, numba.

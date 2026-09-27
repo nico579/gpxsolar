@@ -47,13 +47,7 @@ jobs:
 
       - name: Dependances critiques communes
         # Même liste que ci.yml (l'import de gpxsolar les exige toutes).
-        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pywebview simplekml shapely Pillow pyproj rasterio
-
-      - name: Backend GUI Qt
-        # PyQt6 fait partie des deps critiques sous Linux (cf.
-        # _gui_deps_plateforme) : sans lui, le check de bootstrap échoue même
-        # si le smoke n'ouvre aucune fenêtre.
-        run: pip install PyQt6 PyQt6-WebEngine qtpy
+        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pystray simplekml shapely Pillow pyproj rasterio
 
       - name: Smoke reseau
         run: python smoke_gpxsolar.py

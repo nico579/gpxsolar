@@ -5,7 +5,7 @@
 #
 # 1. Installe Python 3.12 si absent (depuis python.org)
 # 2. Lance gpxsolar.py --installer-deps -> cree ~/.gpxsolar/venv + toutes les
-#    deps (dont pyobjc + PyQt6/WebEngine pour le backend GUI)
+#    deps (dont pystray et pyobjc pour l'icône de la barre des menus)
 # 3. Installe PyInstaller
 #
 # (Contrairement a lidar2map, gpxsolar n'a PAS besoin de JRE ni d'osmosis.)

@@ -54,7 +54,8 @@ VERSION_FILE = "gpxsolar.py"
 # Les tests hors réseau que lance aussi la CI (ci.yml), dans le même ordre.
 # gpxsolar n'a pas de lanceur de suites comme le tests/run_tests.py de
 # lidar2map : trois scripts suffisent.
-TESTS = ("test_gpxsolar.py", "test_dossiers.py", "test_installation.py")
+TESTS = ("test_gpxsolar.py", "test_dossiers.py", "test_installation.py",
+         "test_serve_web.py")
 SRC = Path(__file__).resolve().parent
 BRANCHE_RELEASE = "main"
 SHA_GIT_RE = re.compile(r"^[0-9a-f]{40}$")

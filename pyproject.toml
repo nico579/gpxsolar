@@ -7,7 +7,7 @@
 target-version = "py39"    # version Python minimale supportée par gpxsolar
 # Dossiers de travail locaux, jamais poussés sur le repo. Sans ces exclusions,
 # `ruff check .` en local remonterait les défauts du code TIERS embarqué dans
-# le build (dist_onedir/_internal/ = numba, qtpy, PyQt6… soit ~815 trouvailles
+# le build (dist_onedir/_internal/ = numba, pandas… soit des centaines de trouvailles
 # qui noient les 25 du vrai code).
 extend-exclude = ["dist_onedir", "build", "dist", "HGT", "LIDAR_CACHE",
                   "RGEALTI_CACHE", "WorldCover", "GPX_Ombres"]

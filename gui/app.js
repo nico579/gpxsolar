@@ -46,6 +46,14 @@ const I18N = {
     "req.time":"Veuillez sélectionner une heure.", "req.dem":"Veuillez sélectionner un modèle d'altitude.",
     "running":"En cours…", "launcherr":"Erreur de lancement : ", "stopped":"⚠ Arrêté",
     "stopping":"⏳ Arrêt en cours…",
+    // Parcours des fichiers et instance déjà ouverte (repris de lidar2map)
+    "browse.title.dir":"📁 Choisir un dossier", "browse.title.file":"📄 Choisir un fichier",
+    "browse.choose":"Choisir ce dossier", "browse.select":"Valider la sélection",
+    "browse.empty":"(dossier vide)", "browse.selected":"sélectionné(s) :",
+    "instance.title":"gpxsolar est déjà ouvert",
+    "instance.hint":"Une instance tourne déjà et s'affiche dans cet onglet. Pour lancer un calcul en parallèle, démarrez une nouvelle instance (second serveur).",
+    "instance.keep":"Continuer avec cette instance", "instance.new":"➕ Nouvelle instance",
+    "newinst.starting":"Démarrage d'une nouvelle instance gpxsolar…", "apiunavail":"API non disponible",
   },
   en: {
     "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.help":"? Help", "btn.hist":"⏱ History",
@@ -84,6 +92,13 @@ const I18N = {
     "req.time":"Please select a time.", "req.dem":"Please select an elevation model.",
     "running":"Running…", "launcherr":"Launch error: ", "stopped":"⚠ Stopped",
     "stopping":"⏳ Stopping…",
+    "browse.title.dir":"📁 Choose a folder", "browse.title.file":"📄 Choose a file",
+    "browse.choose":"Choose this folder", "browse.select":"Confirm selection",
+    "browse.empty":"(empty folder)", "browse.selected":"selected:",
+    "instance.title":"gpxsolar is already open",
+    "instance.hint":"An instance is already running and is shown in this tab. To run a computation in parallel, start a new instance (second server).",
+    "instance.keep":"Continue with this instance", "instance.new":"➕ New instance",
+    "newinst.starting":"Starting a new gpxsolar instance…", "apiunavail":"API unavailable",
   },
 };
 let _lang = 'fr';
@@ -106,27 +121,33 @@ function applyI18n(){
 function setLang(code, persist){
   _lang = (code === 'en') ? 'en' : 'fr';
   applyI18n();
-  if (persist && window.pywebview && pywebview.api && pywebview.api.set_lang) {
-    pywebview.api.set_lang(_lang).catch(e => console.error('set_lang error:', e));
+  if (persist) {
+    api.set_lang(_lang).catch(e => console.error('set_lang error:', e));
   }
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
-// Les données sont déjà injectées dans window.INIT_DATA (rendu synchrone).
-// On attend juste DOMContentLoaded puis on rend tout immédiatement.
-document.addEventListener('DOMContentLoaded', () => {
-  const _saved = (window.INIT_DATA && window.INIT_DATA.lang);
-  setLang((_saved === 'fr' || _saved === 'en') ? _saved : detectLang(), false);
+// Les données initiales viennent du serveur (/api/init), relues à chaque
+// chargement : une page rechargée après un calcul retrouve sa configuration.
+// Avant la 1.6.0, pywebview les injectait dans le HTML.
+document.addEventListener('DOMContentLoaded', async () => {
   installerResize();
+  let d = {}, erreur = null;
+  try { d = (await api.get_init_data()) || {}; } catch(e) { erreur = e; }
+  setLang((d.lang === 'fr' || d.lang === 'en') ? d.lang : detectLang(), false);
   try {
-    initFromData(window.INIT_DATA || {});
+    if (erreur) throw erreur;
+    initFromData(d);
+    // Le titre de la fenêtre pywebview portait la version : l'onglet aussi.
+    if (d.version) document.title = 'Simu Rando Solaire ' + d.version;
   } catch(e) {
     document.getElementById('footer-status').textContent = t('initerr') + e;
     console.error('init error:', e);
   }
-  // Démarrer le polling pour les logs/progress dès qu'un calcul tournera.
-  // On retente l'init du polling tant que pywebview.api n'est pas prêt.
-  startPollingWhenReady();
+  // Journal et progression interrogés dès le départ : le serveur est prêt
+  // puisqu'il vient de servir cette page.
+  if (!_polling) boucleDeSondage();
+  verifierInstanceDejaOuverte();
 });
 
 function initFromData(d) {
@@ -141,15 +162,6 @@ function initFromData(d) {
   buildHistorique(d.historique || []);
   ajouterLigneLog(t('log.init1'), 'dim');
   ajouterLigneLog(t('log.init2'), 'dim');
-}
-
-function startPollingWhenReady(tries=0) {
-  if (window.pywebview && window.pywebview.api &&
-      typeof window.pywebview.api.poll_log === 'function') {
-    if (!_polling) _polling = setInterval(pollOnce, 250);
-    return;
-  }
-  if (tries < 400) setTimeout(() => startPollingWhenReady(tries+1), 50);
 }
 
 function buildTimeOptions(opts) {
@@ -270,11 +282,176 @@ function iso_to_ddmmyyyy(s) {
 }
 
 // ── Dialogs ──────────────────────────────────────────────────────────────────
+// Bouton « … » du fichier GPX : parcours du disque côté serveur, positionné
+// sur le dossier du fichier déjà choisi (sinon Documents, côté serveur).
 async function pickGpx() {
-  try {
-    const p = await pywebview.api.pick_gpx();
-    if (p) document.getElementById('f-gpx').value = p;
-  } catch(e) { console.error(e); }
+  const cur = (document.getElementById('f-gpx').value || '').trim();
+  const dossier = cur ? cur.replace(/[\\/][^\\/]*$/, '') : '';
+  const p = await browseOuvrir({ mode: 'file', exts: ['.gpx'], start: dossier });
+  if (p) document.getElementById('f-gpx').value = p;
+}
+
+// ── Navigateur de dossiers/fichiers côté serveur ───────────────────────────
+// Repris de lidar2map. Remplace le sélecteur natif de pywebview (retiré) :
+// un navigateur ne peut pas parcourir le disque du SERVEUR lui-même, donc
+// /api/browse-dir liste et cette UI navigue dedans (clic sur un dossier =
+// descendre, ⬆ = remonter).
+let _browseState = null;   // {mode:'dir'|'file', multiple, exts, kind, path, selection, resolve}
+
+function _browseCheminEnfant(base, nom) {
+  const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
+  return base.endsWith(sep) ? base + nom : base + sep + nom;
+}
+
+function _browseMajSelection() {
+  const n = _browseState.selection.size;
+  document.getElementById('browse-selection').textContent = n ? `${n} ${t('browse.selected')}` : '';
+}
+
+function _browseRender(data) {
+  _browseState.path = data.path;
+  document.getElementById('browse-path').textContent = data.path;
+  document.getElementById('browse-up').disabled = !data.parent;
+  const liste = document.getElementById('browse-list');
+  liste.innerHTML = '';
+  if (!data.dirs.length && !data.files.length) {
+    const vide = document.createElement('div');
+    vide.style.cssText = 'color:var(--dim);padding:4px';
+    vide.textContent = t('browse.empty');
+    liste.appendChild(vide);
+  }
+  data.dirs.forEach(nom => {
+    const ligne = document.createElement('div');
+    ligne.textContent = '📁 ' + nom;
+    ligne.style.cssText = 'padding:4px 6px;cursor:pointer;border-radius:4px';
+    ligne.onmouseenter = () => { ligne.style.background = 'var(--bg3)'; };
+    ligne.onmouseleave = () => { ligne.style.background = ''; };
+    ligne.onclick = () => _browseCharger(_browseCheminEnfant(data.path, nom));
+    liste.appendChild(ligne);
+  });
+  data.files.forEach(nom => {
+    const chemin = _browseCheminEnfant(data.path, nom);
+    const ligne = document.createElement('div');
+    const choisi = _browseState.selection.has(chemin);
+    ligne.textContent = (choisi ? '☑ ' : '☐ ') + '📄 ' + nom;
+    ligne.style.cssText = 'padding:4px 6px;cursor:pointer;border-radius:4px';
+    ligne.onclick = () => {
+      if (_browseState.multiple) {
+        if (_browseState.selection.has(chemin)) _browseState.selection.delete(chemin);
+        else _browseState.selection.add(chemin);
+        _browseRender(data);
+        _browseMajSelection();
+      } else {
+        _browseState.selection = new Set([chemin]);
+        browseConfirmer();
+      }
+    };
+    liste.appendChild(ligne);
+  });
+}
+
+async function _browseCharger(path) {
+  const params = new URLSearchParams();
+  if (path) params.set('path', path);
+  else if (_browseState.kind) params.set('kind', _browseState.kind);
+  if (_browseState.exts && _browseState.exts.length) params.set('exts', _browseState.exts.join(','));
+  if (_browseState.mode) params.set('mode', _browseState.mode);
+  const reponse = await fetch('/api/browse-dir?' + params.toString());
+  _browseRender(await reponse.json());
+}
+
+function browseMonter() {
+  if (!_browseState) return;
+  fetch('/api/browse-dir?path=' + encodeURIComponent(_browseState.path)).then(r => r.json()).then(data => {
+    if (data.parent) _browseCharger(data.parent);
+  });
+}
+
+function browseConfirmer() {
+  if (!_browseState) return;
+  document.getElementById('browse-modal').style.display = 'none';
+  const { mode, multiple, path, selection, resolve } = _browseState;
+  _browseState = null;
+  if (mode === 'dir') { resolve(path); return; }
+  const choix = Array.from(selection);
+  resolve(multiple ? choix : (choix[0] || null));
+}
+
+function fermerBrowse() {
+  document.getElementById('browse-modal').style.display = 'none';
+  if (_browseState) {
+    const resolve = _browseState.resolve;
+    _browseState = null;
+    resolve(null);
+  }
+}
+
+// mode 'dir' : navigue puis "Choisir ce dossier" renvoie le dossier affiché.
+// mode 'file' : clic sur un fichier renvoie direct (multiple=false) ou coche
+// pour une sélection multiple validée par "Valider la sélection".
+function browseOuvrir({ mode, multiple = false, exts = [], kind = '', start = '' }) {
+  return new Promise(resolve => {
+    _browseState = { mode, multiple, exts, kind, path: '', selection: new Set(), resolve };
+    document.getElementById('browse-title').textContent =
+      t(mode === 'dir' ? 'browse.title.dir' : 'browse.title.file');
+    const bouton = document.getElementById('browse-confirm');
+    bouton.textContent = t(mode === 'dir' ? 'browse.choose' : 'browse.select');
+    bouton.style.display = (mode === 'file' && !multiple) ? 'none' : '';
+    document.getElementById('browse-selection').textContent = '';
+    document.getElementById('browse-modal').style.display = 'flex';
+    _browseCharger(start);
+  });
+}
+
+// ── Instance déjà ouverte / nouvelle instance ─────────────────────────────
+// Repris de lidar2map. Second serveur pour un calcul en parallèle (sans
+// terminal, c'est le seul moyen : un relancement de l'application rejoint
+// l'instance existante). L'onglet est ouvert TOUT DE SUITE, pendant le geste
+// utilisateur : ouvert après l'attente du démarrage (plusieurs secondes), il
+// serait bloqué comme popup. dansCetOnglet=true (choix posé à la relance,
+// cf. verifierInstanceDejaOuverte) : cet onglet, ouvert pour la question,
+// part vers la nouvelle instance au lieu d'en ouvrir un autre.
+function nouvelleInstance(dansCetOnglet) {
+  if (dansCetOnglet) {
+    document.getElementById('footer-status').textContent = t('newinst.starting');
+    Promise.resolve(api.new_instance()).then(r => {
+      if (!r || !r.ok) { alert((r && r.error) || t('apiunavail')); return; }
+      location.href = location.protocol + '//' + location.hostname + ':' + r.port + '/';
+    }).catch(e => alert(t('apiunavail') + ' : ' + e));
+    return;
+  }
+  const onglet = window.open('', '_blank');
+  if (onglet) {
+    try { onglet.document.title = 'gpxsolar'; onglet.document.body.textContent = t('newinst.starting'); }
+    catch (e) { /* page d'attente facultative */ }
+  }
+  Promise.resolve(api.new_instance()).then(r => {
+    if (!r || !r.ok) {
+      if (onglet) onglet.close();
+      alert((r && r.error) || t('apiunavail'));
+      return;
+    }
+    const url = location.protocol + '//' + location.hostname + ':' + r.port + '/';
+    if (onglet) onglet.location.href = url; else window.open(url, '_blank');
+  }).catch(e => {
+    if (onglet) onglet.close();
+    alert(t('apiunavail') + ' : ' + e);
+  });
+}
+// Relance sans terminal visible alors qu'une instance tourne : le serveur a
+// ouvert cette page avec ?deja-ouverte=1 pour poser ici la question. Le
+// paramètre est retiré de l'adresse (un rechargement ne la repose pas).
+function verifierInstanceDejaOuverte() {
+  if (!new URLSearchParams(location.search).has('deja-ouverte')) return;
+  history.replaceState(null, '', location.pathname);
+  const modal = document.getElementById('instance-modal');
+  if (modal) modal.style.display = 'flex';
+  const garder = document.getElementById('instance-keep');
+  if (garder) garder.focus();
+}
+function fermerInstanceModal() {
+  const modal = document.getElementById('instance-modal');
+  if (modal) modal.style.display = 'none';
 }
 
 // ── Aide ─────────────────────────────────────────────────────────────────────
@@ -352,7 +529,7 @@ async function viderHistorique() {
   if (!_historique.length) { alert(t('hist.alreadyempty')); return; }
   if (!confirm(tf('hist.confirm', {n: _historique.length}))) return;
   try {
-    const r = await pywebview.api.clear_historique();
+    const r = await api.clear_historique();
     if (r && r.ok) {
       buildHistorique([]);
       document.getElementById('footer-status').textContent = t('hist.cleared');
@@ -364,7 +541,7 @@ async function viderHistorique() {
 
 async function rafraichirHistorique() {
   try {
-    const hist = await pywebview.api.get_historique();
+    const hist = await api.get_historique();
     if (Array.isArray(hist)) buildHistorique(hist);
   } catch(e) { /* silencieux */ }
 }
@@ -383,7 +560,9 @@ function viderLog() {
 }
 function copierLog() {
   const txt = document.getElementById('log-content').innerText;
-  // navigator.clipboard.writeText ne fonctionne pas dans WebView2/pywebview en file://
+  // execCommand plutôt que navigator.clipboard : hérité de la fenêtre
+  // pywebview (<= 1.5), où l'API du presse-papiers ne marchait pas ; il
+  // marche aussi dans un navigateur.
   const ta = document.createElement('textarea');
   ta.value = txt; document.body.appendChild(ta);
   ta.select(); try { document.execCommand('copy'); } catch(e) {}
@@ -427,9 +606,33 @@ function installerResize() {
 }
 
 // ── Polling logs/progress ────────────────────────────────────────────────────
+// Sondage SÉQUENTIEL (setTimeout relancé après chaque réponse), pas
+// setInterval : leçon de lidar2map, un callback async sous setInterval se
+// chevauche dès qu'une réponse dépasse 250 ms (lignes de journal dans le
+// désordre, fin de calcul traitée deux fois, double alerte).
+async function boucleDeSondage() {
+  await pollOnce();
+  _polling = setTimeout(boucleDeSondage, 250);
+}
+
+let _echecsPoll = 0;
 async function pollOnce() {
+  let r;
   try {
-    const r = await pywebview.api.poll_log();
+    r = await api.poll_log();
+    _echecsPoll = 0;
+  } catch(e) {
+    // Serveur arrêté ou relancé (icône) : quelques échecs tolérés, puis un
+    // calcul en cours est rendu en erreur plutôt que figé sur « En cours ».
+    if (++_echecsPoll >= 20 && _running) {
+      _running = false;
+      ajouterLigneLog('\n✗ ' + t('apiunavail') + ' : ' + e + '\n', 'err');
+      setLogProgress(100, 'err');
+      btnReset();
+    }
+    return;
+  }
+  try {
     if (r && r.items) {
       r.items.forEach(it => {
         if (it.line !== undefined) ajouterLigneLog(it.line, it.tag || 'ok');
@@ -458,7 +661,7 @@ async function pollOnce() {
         const panLog = document.getElementById('panneau-log');
         if (panLog && panLog.classList.contains('hidden')) toggleLogPanel();
         try {
-          const err = await pywebview.api.get_last_error();
+          const err = await api.get_last_error();
           if (err && err.msg) {
             alert(tf('fail.detail', {c: err.retcode, msg: err.msg}));
           }
@@ -466,7 +669,7 @@ async function pollOnce() {
       }
       btnReset();
     }
-  } catch(e) { /* polling peut échouer brièvement à l'init */ }
+  } catch(e) { console.error('poll error:', e); }
 }
 
 // ── Lancement ────────────────────────────────────────────────────────────────
@@ -527,7 +730,7 @@ async function lancer() {
   if (panLog && panLog.classList.contains('hidden')) toggleLogPanel();
 
   try {
-    const res = await pywebview.api.launch(cfg);
+    const res = await api.launch(cfg);
     if (res && res.error) {
       alert(res.error);
       btnReset();
@@ -544,7 +747,7 @@ async function arreter() {
   // actif : pollOnce détecte la fin réelle (code 130) et réarme les boutons.
   // Un process tué est mort sans ambiguïté, donc relancer ne répond jamais à
   // tort « un calcul est déjà en cours ».
-  try { await pywebview.api.stop(); } catch(e) {}
+  try { await api.stop(); } catch(e) {}
   document.getElementById('btn-stop').disabled = true;
   document.getElementById('log-status').textContent = t('stopping');
   document.getElementById('footer-status').textContent = t('stopping');

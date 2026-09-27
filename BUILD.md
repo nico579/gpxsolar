@@ -18,17 +18,17 @@ gpxsolar-windows-x86_64/           (gpxsolar-linux-x86_64/ sous Linux)
   gpxsolar.exe                     entry point = _loader.py
   _internal/
     gpxsolar.py                    exécuté en texte par _loader.py
-    gui/, PyQt6/, pyproj/, rasterio/, ...
+    gui/, pyproj/, rasterio/, ...
 
 GPXSOLAR.app/                      (macOS)
   Contents/MacOS/gpxsolar
-  Contents/Frameworks/             sys._MEIPASS : binaires (Qt compris),
+  Contents/Frameworks/             sys._MEIPASS : binaires,
                                    liens vers les données
   Contents/Resources/              données (gpxsolar.py, gui/...)
 ```
 
 Le onedir (`gpxsolar_win.spec` / `gpxsolar_mac.spec`) est la vraie
-application, lourde (numpy, rasterio, pyproj, shapely, pysolar, pywebview…) :
+application, lourde (numpy, rasterio, pyproj, shapely, pysolar…) :
 lente à packager, rapide à lancer. Sous macOS, `BUNDLE()` en fait
 `GPXSOLAR.app`, sous le nom et l'identifiant qu'avait le `.app` du lanceur.
 
@@ -45,22 +45,22 @@ une ancienne instance tourne encore depuis l'extraction, son renommage
 archives et de leur dossier racine n'a pas changé : décompressée par-dessus,
 une archive met le programme au chemin du lanceur, raccourcis compris.
 
-### Backend GUI : Qt sur les 3 OS
+### Interface : un serveur web local
 
-La GUI (pywebview) utilise le backend **Qt** (PyQt6 + QtWebEngine) sur **Windows,
-Linux et macOS** — forcé via `PYWEBVIEW_GUI=qt` (posé dans `show_form`, et par le
-runtime hook `_runtime_hook_qt.py` en frozen). Sous Windows c'est un choix
-délibéré : le backend WinForms/WebView2 par défaut passe par pythonnet/.NET, et
-**pythonnet 3.1.0** y régresse — récursion infinie dans la sérialisation d'objets
-.NET (`Rectangle.Empty.Empty…`) → le bridge JS↔Python ne se finalise pas → GUI
-gelée au clic, plus des freezes WinForms intermittents. Qt supprime toute la
-couche .NET et donne le même moteur Chromium partout.
+Depuis la 1.6.0, l'interface n'est plus une fenêtre : `gpxsolar.py` la sert en
+HTTP local (`_serve_web.py`, bibliothèque standard seulement) et l'ouvre dans
+le navigateur déjà installé, comme lidar2map, blink2video et watch2notif. Une
+icône de zone de notification (pystray) permet de la rouvrir, de redémarrer ou
+d'arrêter le serveur. Jusqu'à la 1.5, pywebview l'affichait dans une fenêtre
+Qt (PyQt6 + QtWebEngine), qui pesait 557 Mo sur les 941 du programme ; Qt y
+avait lui-même remplacé le backend WinForms de Windows, dont la couche
+pythonnet 3.1.0 gelait l'interface.
 
-Conséquence : une archive Windows plus grosse (QtWebEngine, ~390 Mo zippée
-contre ~180 en WinForms). Les specs `*_win.spec`
-bundlent PyQt6 (`collect_all`) et excluent winforms/clr/pythonnet ; le venv de
-build doit donc contenir `PyQt6 PyQt6-WebEngine qtpy` (installés par
-`--installer-deps` / `setup_build_*`).
+Le serveur n'écoute que sur la boucle locale (127.0.0.1), à partir du port
+8768 : blink2video prend 8765, lidar2map 8766 et watch2notif 8767. Un second
+lancement rejoint l'instance en cours ou, sur demande, en démarre une nouvelle
+sur le port suivant, pour un calcul en parallèle. Options :
+`gpxsolar --serve-gui --help`.
 
 ### Le rôle de `_loader.py`
 
@@ -86,6 +86,7 @@ Le onedir est buildé en **2 passes Analysis** :
 | `_dossiers.py` | Dossiers d'état (`gpxsolar-data`) et de sorties (`Documents/gpxsolar`), reprise de l'état d'une 1.3 : jumeau de celui de lidar2map |
 | `_atomic_files.py` | Écriture atomique et verrou entre processus, sous-ensemble de celui de lidar2map |
 | `_installation.py` | Dossier du programme, ménage de ce qu'un lanceur ≤ 1.4 laissait, `--desinstaller` : jumeau des fonctions de lidar2map |
+| `_serve_web.py` | Serveur HTTP local de l'interface (`gui/`, routes `/api/*`, refus des provenances étrangères) : copie de celui de lidar2map |
 | `gpxsolar_win.spec` | Spec onedir **Windows ET Linux** (ELF) |
 | `gpxsolar_win_build.ps1` | Build Windows (une passe PyInstaller) |
 | `setup_build_windows.ps1` | Prépare la machine Windows |
@@ -94,7 +95,7 @@ Le onedir est buildé en **2 passes Analysis** :
 | `gpxsolar_mac.spec` | Spec macOS (arm64 ou x86_64) : onedir puis `GPXSOLAR.app` (`BUNDLE`) |
 | `gpxsolar_mac_build.sh` | Build macOS (3 étapes : PyInstaller, signature ad hoc du `.app`, archive ditto) |
 | `setup_build_mac.sh` | Prépare la machine macOS |
-| `exe_smoke.py` | Épreuve du binaire publié (démarrage, ménage de l'ancien lanceur), lancée par `release.yml` sur les 4 runners |
+| `exe_smoke.py` | Épreuve du binaire publié (démarrage, ménage de l'ancien lanceur, serveur de l'interface), lancée par `release.yml` sur les 4 runners |
 | `deploy.py` | **Déploiement unifié en 1 commande** (cross-platform Win/Mac/Linux) : tests, commit et push depuis ce dépôt, puis tag et suivi du build de release |
 | `.github/workflows/ci.yml` | **CI** : tests 3 OS au push de `gpxsolar.py` |
 | `.github/workflows/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
@@ -122,7 +123,8 @@ bash gpxsolar_linux_build.sh
 ```
 Le binaire dépend de la libc de
 la machine de build (build sur Ubuntu 22.04 → tourne sur Ubuntu ≥ 22.04 /
-Debian 12+). Sur Linux, le backend GUI est PyQt6 + WebEngine.
+Debian 12+). Sur Linux, l'icône de notification passe par pystray (X11, ou
+AppIndicator s'il est installé) ; sans affichage, le serveur tourne sans elle.
 
 ### macOS (Apple Silicon)
 ```bash
@@ -154,8 +156,9 @@ l'ancienne.
 ### Déploiement en une commande : `deploy.py`
 
 Ce dossier de travail est le dépôt GitHub lui-même. `deploy.py` y lance les
-tests hors réseau de la CI (`test_gpxsolar.py`, `test_dossiers.py`) et
-`ruff`, commit, pousse sur `main` et, avec `--new-tag`, pose le tag
+tests hors réseau de la CI (`test_gpxsolar.py`, `test_dossiers.py`,
+`test_installation.py`, `test_serve_web.py`) et `ruff`, commit, pousse sur
+`main` et, avec `--new-tag`, pose le tag
 `v<VERSION>` qui déclenche `release.yml`, dont il suit le build.
 
 ```bash
@@ -203,8 +206,13 @@ source de vérité des binaires distribués.
 
 - **`PyInstaller introuvable`** : le venv `~/.gpxsolar/venv` n'a pas PyInstaller.
   Relance le `setup_build_*` correspondant.
-- **GUI ne s'ouvre pas sous Linux** : backend Qt manquant. `--installer-deps`
-  installe `PyQt6 PyQt6-WebEngine qtpy` ; vérifie qu'ils sont dans le venv.
+- **L'interface ne s'ouvre pas dans le navigateur** : le programme affiche
+  l'adresse de son serveur (`gpxsolar web GUI: http://127.0.0.1:8768/`),
+  à ouvrir à la main ; l'icône de notification a aussi une entrée Ouvrir.
+- **Un second lancement ne démarre rien** : une instance tourne déjà, et ce
+  lancement la rouvre dans le navigateur. Pour un calcul en parallèle,
+  répondre N à la question du terminal, cliquer « Nouvelle instance » dans
+  la page, ou lancer `gpxsolar --serve-gui --new-instance`.
 - **macOS « application endommagée »** : quarantaine Gatekeeper, voir §3.
 - **Ancienne extraction toujours présente (Windows)** : la 1.5 la retire à son
   premier démarrage, sauf si une instance d'une version ≤ 1.4 y tourne
@@ -214,12 +222,11 @@ source de vérité des binaires distribués.
 
 ### Spécifique Linux
 
-- **Qt « xcb plugin » au démarrage** : libs système manquantes.
-  `sudo apt install libxcb-cursor0 libegl1 libgl1` (Debian/Ubuntu).
+- **Pas d'icône de notification** : pystray a besoin d'un affichage (X11) ou
+  d'AppIndicator. Sans eux, le programme l'annonce, tourne sans icône et
+  s'arrête par Ctrl+C.
 - **`ModuleNotFoundError: No module named 'venv'`** : le module venv de Python
   est packagé séparément sur Debian/Ubuntu. `sudo apt install python3.12-venv`.
-- **Wayland, artefacts d'affichage Qt** : forcer X11 :
-  `QT_QPA_PLATFORM=xcb python3 gpxsolar.py`.
 
 ### Spécifique macOS
 
@@ -231,10 +238,6 @@ source de vérité des binaires distribués.
   symboliques, ni les bits d'exécution, ni les attributs du `.app` (le module
   `zipfile` de Python, par exemple). Réextraire avec le Finder ou
   `ditto -x -k gpxsolar-macos-arm64.zip .`.
-- **Écran blanc dans la GUI** : QtWebEngine n'a pas trouvé son helper.
-  Vérifier que le build PyInstaller a généré le runtime hook
-  (cf. `gpxsolar_mac.spec`, section *Runtime hook*). En dev (script Python
-  direct), c'est piloté par `pyobjc-framework-WebKit` côté Cocoa.
 - **Apple Silicon, crash au démarrage / `mach-o, but wrong architecture`** :
   vérifier que `python3` est arm64 :
   `python3 -c "import platform; print(platform.machine())"` doit dire `arm64`
@@ -257,7 +260,13 @@ python test_gpxsolar.py     # runner intégré, code de sortie != 0 si échec
 pytest test_gpxsolar.py     # équivalent via pytest
 python test_dossiers.py     # dossiers d'état et de sorties (unittest)
 python test_installation.py # ménage de l'ancien lanceur, désinstallation
+python test_serve_web.py    # interface web : serveur, instances, pont JS
 ```
+
+`test_serve_web.py` éprouve l'interface web sur un vrai port de la boucle
+locale : pages et routes servies, refus des provenances étrangères, instance
+déjà ouverte, nouvelle instance, parcours des fichiers, et accord entre la
+page, le pont `gui/web_bridge.js` et les routes du serveur.
 
 `test_dossiers.py` éprouve `_dossiers.py` et son branchement dans
 `gpxsolar.py` : reprise unique de l'état d'une 1.3, chemins de la ligne de

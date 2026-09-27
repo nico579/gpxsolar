@@ -4,9 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Simu Rando Solaire</title>
-<style>
-/*__GPXSOLAR_CSS__*/
-</style>
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
@@ -201,9 +199,58 @@
   </div>
 </div>
 
-<script>
-/*__INIT_DATA__*/
-//__GPXSOLAR_JS__
-</script>
+<!-- Parcours des dossiers et fichiers côté serveur (remplace le sélecteur
+     natif de pywebview : le navigateur ne peut pas parcourir le disque du
+     serveur lui-même, donc c'est le serveur qui liste, /api/browse-dir).
+     Repris de lidar2map. -->
+<div id="browse-modal" style="display:none;position:fixed;inset:0;z-index:1000;
+     background:rgba(0,0,0,.55);align-items:center;justify-content:center">
+ <div style="background:var(--bg2,#1e1e1e);color:var(--fg,#eee);border-radius:10px;
+      padding:16px 20px;width:min(560px,92vw);max-height:80vh;display:flex;
+      flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.5)">
+  <div style="display:flex;align-items:center;margin-bottom:8px">
+   <div id="browse-title" style="font-weight:600;font-size:1.1em" data-i18n="browse.title.file">📄 Choisir un fichier</div>
+   <button class="btn" onclick="fermerBrowse()" data-i18n="close"
+           style="margin-left:auto;background:var(--bg3);border:1px solid var(--ac);color:var(--fg)">Fermer</button>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+   <button class="btn" id="browse-up" onclick="browseMonter()"
+           style="background:var(--bg3);border:1px solid var(--ac);color:var(--fg)">⬆</button>
+   <div id="browse-path" style="font-size:11px;color:var(--dim);overflow:auto;white-space:nowrap;flex:1"></div>
+  </div>
+  <div id="browse-list" style="overflow:auto;flex:1;border:1px solid var(--ac);border-radius:6px;padding:4px"></div>
+  <div style="display:flex;align-items:center;margin-top:10px;gap:8px">
+   <div id="browse-selection" style="font-size:11px;color:var(--dim);flex:1"></div>
+   <button class="btn" id="browse-confirm" onclick="browseConfirmer()"
+           style="background:var(--bg3);border:1px solid var(--ac);color:var(--fg)" data-i18n="browse.choose">Choisir</button>
+  </div>
+ </div>
+</div>
+
+<!-- gpxsolar relancé sans terminal visible (double-clic) alors qu'une
+     instance tourne : le serveur ouvre cette instance avec ?deja-ouverte=1
+     et c'est ici que la question rejoindre / nouvelle instance est posée.
+     Repris de lidar2map. -->
+<div id="instance-modal" style="display:none;position:fixed;inset:0;z-index:1000;
+     background:rgba(0,0,0,.55);align-items:center;justify-content:center">
+ <div style="background:var(--bg2,#1e1e1e);color:var(--fg,#eee);border-radius:10px;
+      padding:20px 24px;max-width:92vw;width:min(480px,92vw);
+      box-shadow:0 8px 40px rgba(0,0,0,.5)">
+  <div style="font-weight:600;font-size:1.1em;margin-bottom:4px" data-i18n="instance.title">gpxsolar est déjà ouvert</div>
+  <div style="font-size:.85em;color:var(--dim,#999);margin-bottom:12px" data-i18n="instance.hint">
+   Une instance tourne déjà et s'affiche dans cet onglet. Pour lancer un calcul
+   en parallèle, démarrez une nouvelle instance (second serveur).
+  </div>
+  <div style="display:flex;align-items:center;margin-top:12px;gap:8px">
+   <button class="btn" id="instance-keep" onclick="fermerInstanceModal()" data-i18n="instance.keep"
+           style="background:var(--bg3);border:1px solid var(--ac);color:var(--fg)">Continuer avec cette instance</button>
+   <button class="btn" onclick="fermerInstanceModal(); nouvelleInstance(true)" data-i18n="instance.new"
+           style="margin-left:auto;background:var(--bg3);border:1px solid var(--ac);color:var(--fg)">➕ Nouvelle instance</button>
+  </div>
+ </div>
+</div>
+
+<script src="/web_bridge.js"></script>
+<script src="/app.js"></script>
 </body>
 </html>

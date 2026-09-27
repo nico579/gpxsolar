@@ -7,8 +7,10 @@ on:
       - 'test_gpxsolar.py'
       - 'test_dossiers.py'
       - 'test_installation.py'
+      - 'test_serve_web.py'
       - 'exe_smoke.py'
       - '_*.py'
+      - 'gui/**'
       - 'deploy.py'
       - 'smoke_gpxsolar.py'
       - 'pyproject.toml'
@@ -19,8 +21,10 @@ on:
       - 'test_gpxsolar.py'
       - 'test_dossiers.py'
       - 'test_installation.py'
+      - 'test_serve_web.py'
       - 'exe_smoke.py'
       - '_*.py'
+      - 'gui/**'
       - 'deploy.py'
       - 'smoke_gpxsolar.py'
       - 'pyproject.toml'
@@ -86,17 +90,7 @@ jobs:
         run: python -c "import ast; ast.parse(open('_loader.py', encoding='utf-8').read()); print('OK')"
 
       - name: Dependances critiques communes
-        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pywebview simplekml shapely Pillow pyproj rasterio
-
-      - name: Backend GUI Qt (Linux + Windows)
-        # Windows utilise désormais le backend Qt (plus WinForms) -> PyQt6 fait
-        # partie des deps critiques sur Windows aussi (cf. _gui_deps_plateforme).
-        if: runner.os == 'Linux' || runner.os == 'Windows'
-        run: pip install PyQt6 PyQt6-WebEngine qtpy
-
-      - name: Backend GUI Qt + Cocoa (macOS)
-        if: runner.os == 'macOS'
-        run: pip install PyQt6 PyQt6-WebEngine qtpy pyobjc-framework-WebKit pyobjc-framework-Cocoa
+        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pystray simplekml shapely Pillow pyproj rasterio
 
       - name: Import complet sans erreur
         run: |
@@ -131,3 +125,10 @@ jobs:
         # de commande, et un vrai lancement de gpxsolar.py qui ne doit rien
         # créer. Dossiers isolés : jamais ceux du runner.
         run: python test_dossiers.py
+
+      - name: Interface web (test_serve_web.py)
+        # Depuis la 1.6.0, l'interface est servie en HTTP local : serveur,
+        # refus des provenances étrangères, instance déjà ouverte, nouvelle
+        # instance, parcours des fichiers, et accord entre la page, le pont
+        # web_bridge.js et les routes du serveur.
+        run: python test_serve_web.py

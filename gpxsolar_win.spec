@@ -20,9 +20,9 @@ Architecture (miroir lidar2map) :
     1.4, il était zippé dans un bundle qu'un lanceur extrayait.
 
 Cette spec sert AUSSI pour Linux (le nom _win est trompeur — PyInstaller
-produit un ELF sous Linux) :
-  Windows : pywebview -> WinForms / Edge WebView2 (pas de Qt)
-  Linux   : pywebview -> PyQt6 + WebEngine (seul backend pip viable)
+produit un ELF sous Linux). Depuis la 1.6.0, aucun backend graphique à
+embarquer sur l'un ou l'autre : l'interface est servie en HTTP local et
+ouverte dans le navigateur de l'utilisateur, comme celle de lidar2map.
 """
 
 import re
@@ -39,6 +39,11 @@ IS_LINUX = sys.platform.startswith("linux")
 
 ONEFILE = False
 CONSOLE = True
+# Console masquée dès le démarrage seulement si elle appartient au programme
+# (double-clic, raccourci, relance) : lancé depuis un terminal, il y écrit
+# normalement. Repris de lidar2map ; sans lui, la 1.5.0 ouvrait une fenêtre
+# de console à côté de son interface.
+HIDE_CONSOLE = "hide-early" if sys.platform == "win32" else None
 NAME    = "gpxsolar"
 
 SRC = Path(SPECPATH)
@@ -122,25 +127,12 @@ hiddenimports += [
     "pysolar.tzinfo_check", "pysolar.constants",
 ]
 
-# ── pywebview : backend Qt forcé (Windows ET Linux) ──────────────────────────
-# Cette spec sert Windows et Linux ; les deux utilisent désormais le backend Qt
-# (PyQt6 + QtWebEngine). Sous Windows ça remplace WinForms/WebView2+pythonnet
-# (régression pythonnet 3.1.0 + freezes WinForms) -> plus de couche .NET, moteur
-# Chromium identique sur les 3 OS.
-datas         += collect_data_files("webview")
-hiddenimports += collect_submodules("webview")
-for _lib in ("PyQt6", "qtpy"):
-    try:
-        d, b, h = collect_all(_lib)
-        datas += d; binaries += b; hiddenimports += h
-    except Exception as _e:
-        print(f"  [WARN] collect_all({_lib}) a échoué : {_e}")
-hiddenimports += [
-    "webview.platforms.qt",
-    "PyQt6.QtWebEngineWidgets",
-    "PyQt6.QtWebEngineCore",
-    "PyQt6.QtWebChannel",
-]
+# pywebview/PyQt6/QtWebEngine retirés en 1.6.0 (l'interface est servie en
+# HTTP local et consultée depuis le navigateur déjà installé, voir
+# main_serve_gui() dans gpxsolar.py) : plus de backend graphique à bundler.
+# C'était le poste le plus lourd du programme, 557 Mo sur 941. L'icône de
+# zone de notification (pystray) passe par les hooks standard de PyInstaller,
+# comme chez lidar2map.
 
 # ── simplekml : templates XML embarqués ───────────────────────────────────────
 datas += collect_data_files("simplekml")
@@ -192,43 +184,20 @@ hiddenimports += ["urllib3", "charset_normalizer", "idna", "certifi"]
 # ── excludes ──────────────────────────────────────────────────────────────────
 _excludes = [
     "tkinter", "matplotlib",
+    "PyQt5", "PySide2", "PySide6",
     "scipy",                                  # gpxsolar n'utilise pas scipy
     "test", "unittest", "pydoc_data",
     "IPython", "jupyter",
 ]
-# Backend Qt sur Windows+Linux : on garde PyQt6, on exclut WinForms/Cocoa et
-# toute la couche .NET (plus utilisée), ainsi que les autres bindings Qt.
-_excludes += ["webview.platforms.winforms", "webview.platforms.cocoa",
-              "clr", "clr_loader", "clr_loader.netfx", "pythonnet",
-              "PyQt5", "PySide2", "PySide6"]
 
-# ── Runtime hook : forcer PYWEBVIEW_GUI=qt + chemins QtWebEngine ─────────────
-# S'applique Windows ET Linux (backend Qt sur les deux). Les gardes os.path
-# rendent les chemins inexistants inoffensifs sur l'OS qui ne les a pas.
-_hook = SRC / "build" / "_runtime_hook_qt.py"
+# ── Runtime hook : bundle CA de certifi ──────────────────────────────────────
+# Ses lignes Qt/QtWebEngine sont parties avec pywebview. Reste le bundle CA :
+# lidar2map a pu retirer son hook parce qu'il pose ces variables dans son
+# code (_bootstrap_tls.py), gpxsolar non, d'où ce hook réduit à certifi.
+_hook = SRC / "build" / "_runtime_hook_certifi.py"
 _hook.parent.mkdir(parents=True, exist_ok=True)
 _hook.write_text("""\
-import os, sys
-_base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.executable)))
-os.environ.setdefault('PYWEBVIEW_GUI', 'qt')
-_plugins = os.path.join(_base, 'PyQt6', 'Qt6', 'plugins')
-if os.path.isdir(_plugins):
-    os.environ.setdefault('QT_PLUGIN_PATH', _plugins)
-for _cand in (
-    os.path.join(_base, 'PyQt6', 'Qt6', 'bin', 'QtWebEngineProcess.exe'),   # Windows
-    os.path.join(_base, 'PyQt6', 'Qt6', 'libexec', 'QtWebEngineProcess'),   # Linux
-    os.path.join(_base, 'PyQt6', 'QtWebEngineProcess'),
-):
-    if os.path.isfile(_cand):
-        os.environ.setdefault('QTWEBENGINEPROCESS_PATH', _cand)
-        break
-_res = os.path.join(_base, 'PyQt6', 'Qt6', 'resources')
-if os.path.isdir(_res):
-    os.environ.setdefault('QTWEBENGINE_RESOURCES_PATH', _res)
-_loc = os.path.join(_base, 'PyQt6', 'Qt6', 'translations')
-if os.path.isdir(_loc):
-    os.environ.setdefault('QTWEBENGINE_LOCALES_PATH',
-                          os.path.join(_loc, 'qtwebengine_locales'))
+import os
 try:
     import certifi
     os.environ.setdefault('SSL_CERT_FILE', certifi.where())
@@ -260,7 +229,9 @@ a = Analysis(
     datas=datas + [("gpxsolar.py", "."),     # gpxsolar.py en clair dans _internal/
                    ("gui/index.html", "gui"), # front séparé (comme lidar2map),
                    ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
-                   ("gui/app.js", "gui")],    # livré tel quel
+                   ("gui/app.js", "gui"),     # livré tel quel
+                   ("gui/web_bridge.js", "gui"),
+                   ("gui/gpxsolar_icon.png", "gui")],
 
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=_runtime_hooks, excludes=_excludes, noarchive=False, optimize=0,
@@ -279,6 +250,7 @@ if ONEFILE:
         name=NAME, debug=False,
         bootloader_ignore_signals=False, strip=False, upx=False,
         upx_exclude=[], runtime_tmpdir=None, console=CONSOLE,
+        hide_console=HIDE_CONSOLE,
         disable_windowed_traceback=False, argv_emulation=False,
         target_arch=None, codesign_identity=None, entitlements_file=None,
         icon=None,
@@ -289,7 +261,8 @@ else:
         pyz, a.scripts, [],
         exclude_binaries=True, name=NAME, debug=False,
         bootloader_ignore_signals=False, strip=False, upx=False,
-        console=CONSOLE, disable_windowed_traceback=False,
+        console=CONSOLE, hide_console=HIDE_CONSOLE,
+        disable_windowed_traceback=False,
         argv_emulation=False, target_arch=None,
         codesign_identity=None, entitlements_file=None, icon=None,
         version=_version_info(VERSION),

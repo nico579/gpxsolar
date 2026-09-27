@@ -55,7 +55,7 @@ rm -rf "$DIST_OUT/gpxsolar"
 # ── 2. Signature du .app complet ─────────────────────────────────────────────
 # PyInstaller signe déjà le .app à la fin de BUNDLE. Le signer de nouveau en
 # profondeur, puis le vérifier, garantit un sceau valide sur tout son contenu,
-# Qt compris, comme pour lidar2map. Jusqu'à la 1.4, le bundle zippé copié
+# comme pour lidar2map. Jusqu'à la 1.4, le bundle zippé copié
 # après coup dans Contents/Resources rompait ce sceau, et macOS déclarait
 # alors l'application endommagée une fois l'archive téléchargée.
 echo ""

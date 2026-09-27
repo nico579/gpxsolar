@@ -72,8 +72,8 @@ Two ways to use gpxsolar:
 ### A. Python script
 
 On first launch, the script creates `~/.gpxsolar/venv` and installs its
-dependencies there (numpy, pyproj, rasterio, shapely, pysolar, pywebview + PyQt6/QtWebEngine,
-simplekml, timezonefinder, gpxpy, pandas…). ~300-400 MB, **once**.
+dependencies there (numpy, pyproj, rasterio, shapely, pysolar, pystray, simplekml,
+timezonefinder, gpxpy, pandas…). A few hundred MB, **once**.
 
 #### Windows 10+
 ```powershell
@@ -168,6 +168,7 @@ Full build documentation (packaging, releases, troubleshooting):
 | Linux | `chmod +x gpxsolar && ./gpxsolar` in the extracted folder |
 | macOS | Double-click `GPXSOLAR.app`. First launch blocked by Gatekeeper: `xattr -dr com.apple.quarantine GPXSOLAR.app` then double-click |
 
+The interface opens in your browser (see [Usage](#usage)).
 The program starts straight from the extracted folder, with nothing to unpack
 first. Up to version 1.4, a launcher extracted it on first launch, which took
 20 to 30 seconds, into a second copy:
@@ -208,11 +209,11 @@ for instance), point the `GPXSOLAR_HOME` environment variable at it.
 Two modes, selected automatically based on the arguments (same logic as the twin
 project [lidar2map](https://github.com/nico579/lidar2map)):
 
-- **No argument → graphical interface** (pywebview). The common mode.
-- **With arguments → command-line computation** (headless, no window).
+- **No argument → interface in the browser**. The common mode.
+- **With arguments → command-line computation** (headless, no interface).
   Handy for scripting, running on a server, or reproducing an exact render.
 
-### Graphical interface mode (no argument)
+### Interface mode (no argument)
 
 | Platform | Launch |
 |---|---|
@@ -221,8 +222,14 @@ project [lidar2map](https://github.com/nico579/lidar2map)):
 | **macOS** | double-click **`GPXSOLAR.app`** |
 | Script (dev) | `python gpxsolar.py` |
 
-Then in the window:
-1. Choose a **GPX** file.
+Since 1.6.0, the interface opens in your browser at `http://127.0.0.1:8768/`,
+like those of lidar2map and blink2video: gpxsolar serves it itself, to your
+own machine only. An icon appears in the notification area (the menu bar on
+macOS) to reopen it, restart or stop gpxsolar. Up to 1.5, it lived in a Qt
+window, which alone weighed more than half of the program.
+
+Then in the page:
+1. Choose a **GPX** file (the "…" button browses your folders).
 2. Select the **date** and **start time**.
 3. Choose an **elevation source**: SRTM/Copernicus (global), IGN ALTI
    (France), IGN LiDAR HD (France, DTM/DSM/CHM).
@@ -230,9 +237,16 @@ Then in the window:
    options (shadow type, vegetation, analysis resolution).
 5. **Run the computation** → KML/KMZ + CSV.
 
+Launching gpxsolar again while it runs simply reopens the page. For a parallel
+computation, choose "New instance": a second server starts on the next port.
+Interface mode options: `--serve-gui` followed by `--port N` (starting port,
+8768 by default), `--no-browser`, `--no-tray` or `--new-instance`; see
+`gpxsolar --serve-gui --help`.
+
 ### Command-line mode (headless)
 
-As soon as you pass an argument, gpxsolar computes **without opening a window** and
+As soon as you pass an argument (other than `--serve-gui`), gpxsolar computes
+**without opening the interface** and
 writes the outputs into `Documents/gpxsolar/GPX_Ombres/` (KMZ / MBTiles / KML depending on the options —
 see [Output files](#output-files--smartphone-overlay)), plus the CSV. The minimum required is
 `--gpx` + `--date` (DD/MM/YYYY) + `--time` (HH:MM). Everything below applies to the
@@ -363,7 +377,7 @@ shadow sweeps across the hillside as the sun moves.
 
 ### Graphical interface
 
-pywebview form: GPX choice, start date and time, elevation source
+Form in the browser: GPX choice, start date and time, elevation source
 (SRTM / Copernicus / IGN ALTI / IGN LiDAR HD), analysis type (sun/shade or
 slope), shadow type and options. In slope mode the shadow-only fields are hidden.
 
@@ -410,4 +424,4 @@ Data and tools:
 - **NASA / USGS** — SRTM; **Copernicus** — DEM GLO-30
 - **ESA WorldCover** — land cover / vegetation
 - Libraries: pysolar, pyproj, rasterio, shapely, numpy, pandas, gpxpy,
-  simplekml, timezonefinder, pywebview, Pillow, numba.
+  simplekml, timezonefinder, pystray, Pillow, numba.

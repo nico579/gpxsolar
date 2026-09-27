@@ -8,7 +8,7 @@ Usage :
 Résultat (le programme livré tel quel depuis la 1.5.0) :
     dist/GPXSOLAR.app                      (BUNDLE, voir la fin du fichier)
         Contents/MacOS/gpxsolar
-        Contents/Frameworks/               (sys._MEIPASS : binaires, Qt compris)
+        Contents/Frameworks/               (sys._MEIPASS : binaires)
         Contents/Resources/                (données : gpxsolar.py, gui/, ...)
     dist/gpxsolar/                         (dossier onedir intermédiaire)
 
@@ -38,19 +38,9 @@ datas         = []
 binaries      = []
 hiddenimports = []
 
-# ── PyQt6 + pywebview + qtpy (GUI Qt — backend headless-safe sur Mac) ─────────
-for lib in ("PyQt6", "pywebview", "qtpy"):
-    try:
-        d, b, h = collect_all(lib)
-        datas += d; binaries += b; hiddenimports += h
-    except Exception as e:
-        print(f"  [WARN] collect_all({lib!r}) : {e}")
-hiddenimports += [
-    "webview.platforms.qt",
-    "PyQt6.QtWebEngineWidgets",
-    "PyQt6.QtWebEngineCore",
-    "PyQt6.QtWebChannel",
-]
+# pywebview/PyQt6/QtWebEngine retirés en 1.6.0 : l'interface est servie en
+# HTTP local et ouverte dans le navigateur (voir gpxsolar_win.spec). L'icône
+# de la barre des menus (pystray, via PyObjC) passe par les hooks standard.
 
 # ── pyproj ────────────────────────────────────────────────────────────────────
 datas         += collect_data_files("pyproj")
@@ -124,27 +114,13 @@ hiddenimports += ["PIL.Image", "PIL.PngImagePlugin", "PIL.JpegImagePlugin"]
 datas         += collect_data_files("certifi")
 hiddenimports += ["urllib3", "charset_normalizer", "idna", "certifi"]
 
-# ── Runtime hook : PYWEBVIEW_GUI=qt + chemins Qt WebEngine + certifi ─────────
+# ── Runtime hook : bundle CA de certifi ──────────────────────────────────────
+# Ses lignes Qt/QtWebEngine sont parties avec pywebview ; reste le bundle CA
+# (même raison que dans gpxsolar_win.spec).
 _hook = SRC / "build" / "hook_mac_runtime.py"
 _hook.parent.mkdir(parents=True, exist_ok=True)
 _hook.write_text("""\
-import os, sys
-_base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(sys.executable)))
-os.environ.setdefault('PYWEBVIEW_GUI', 'qt')
-_candidates = [
-    os.path.join(_base, 'PyQt6', 'Qt6', 'lib', 'QtWebEngineCore.framework',
-                 'Helpers', 'QtWebEngineProcess.app', 'Contents', 'MacOS',
-                 'QtWebEngineProcess'),
-    os.path.join(_base, 'QtWebEngineProcess'),
-    os.path.join(_base, 'PyQt6', 'QtWebEngineProcess'),
-]
-for _p in _candidates:
-    if os.path.isfile(_p):
-        os.environ.setdefault('QTWEBENGINEPROCESS_PATH', _p)
-        break
-_res = os.path.join(_base, 'PyQt6', 'Qt6', 'Resources')
-if os.path.isdir(_res):
-    os.environ.setdefault('QTWEBENGINE_RESOURCES_PATH', _res)
+import os
 try:
     import certifi
     os.environ.setdefault('SSL_CERT_FILE', certifi.where())
@@ -156,8 +132,6 @@ except Exception:
 _excludes_mac = [
     "tkinter", "matplotlib", "scipy",
     "PyQt5", "PySide2", "PySide6",
-    "webview.platforms.cocoa", "webview.platforms.gtk",
-    "clr_loader", "pythonnet",
     "test", "unittest", "pydoc_data", "IPython", "jupyter",
 ]
 
@@ -177,7 +151,9 @@ a = Analysis(
     datas=datas + [("gpxsolar.py", "."),     # gpxsolar.py en clair dans _internal/
                    ("gui/index.html", "gui"), # front séparé (comme lidar2map),
                    ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
-                   ("gui/app.js", "gui")],    # livré tel quel
+                   ("gui/app.js", "gui"),     # livré tel quel
+                   ("gui/web_bridge.js", "gui"),
+                   ("gui/gpxsolar_icon.png", "gui")],
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=[str(_hook)], excludes=_excludes_mac, noarchive=False, optimize=0,
 )

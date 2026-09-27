@@ -6,7 +6,7 @@
 #      (python3.12-venv est un paquet séparé sur Debian/Ubuntu — sans lui,
 #       la création de venv est impossible)
 #   2. --installer-deps → toutes les dépendances Python dans ~/.gpxsolar/venv
-#      (y compris PyQt6 + WebEngine pour le backend GUI Linux)
+#      (dont pystray pour l'icône de l'interface web)
 #   3. PyInstaller dans ce venv
 #
 # (Contrairement à lidar2map, gpxsolar n'a PAS besoin de JRE ni d'osmosis.)
@@ -37,7 +37,7 @@ ok "$(python3.12 --version)"
 
 # ── 2. gpxsolar.py → bootstrap automatique de toutes les dépendances ──────────
 step "2/3" "Bootstrap des dépendances via gpxsolar.py"
-echo "  Lancement avec --installer-deps (crée ~/.gpxsolar/venv + deps, dont PyQt6)..."
+echo "  Lancement avec --installer-deps (crée ~/.gpxsolar/venv + deps)..."
 python3.12 "$SCRIPT_DIR/gpxsolar.py" --installer-deps
 ok "Dépendances installées dans $VENV"
 

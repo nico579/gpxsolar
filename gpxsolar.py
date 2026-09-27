@@ -13,7 +13,8 @@ RGEALTI 5 m, IGN LiDAR HD 0.5 m. Coordonnées : WGS84 (entrée) / Lambert93
 (EPSG:2154) pour les sorties IGN.
 
 Usage :
-    python gpxsolar.py                # GUI pywebview
+    python gpxsolar.py                # interface dans le navigateur
+    python gpxsolar.py --serve-gui --help   # options de l'interface
     python gpxsolar.py --help         # options CLI
 
 Bootstrap des dépendances (style lidar2map) :
@@ -89,7 +90,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.5.0"
+VERSION      = "1.6.0"
 VERSION_DATE = "2026-09"
 
 
@@ -103,7 +104,11 @@ _DEPS_CRITIQUES = [
     ("requests",        "requests"),
     ("numpy",           "numpy"),
     ("timezonefinder",  "timezonefinder"),
-    ("webview",         "pywebview"),
+    # Icône de zone de notification de l'interface web (depuis la 1.6.0,
+    # qui remplace pywebview + Qt) : critique comme chez lidar2map, pour que
+    # le build l'embarque toujours. Sans elle, le serveur tourne quand même
+    # (arrêt par Ctrl+C).
+    ("pystray",         "pystray"),
     ("simplekml",       "simplekml"),
     ("shapely",         "shapely"),
     ("PIL",             "Pillow"),
@@ -119,41 +124,6 @@ _DEPS_OPTIONNELLES = [
     # restent téléchargeables mais l'extraction échouera.
     ("py7zr",           "py7zr"),
 ]
-
-
-def _gui_deps_plateforme():
-    """Backend GUI de pywebview selon l'OS — (module, paquet pip).
-
-    On force le backend **Qt** (PyQt6 + QtWebEngine) sur les TROIS OS — cf.
-    _forcer_backend_qt(). C'est le même moteur Chromium partout -> pile uniforme.
-
-      Windows  Qt au lieu de WinForms/WebView2+pythonnet : ce dernier souffre
-               d'une régression pythonnet 3.1.0 (sérialisation .NET en récursion
-               infinie -> bridge cassé -> GUI gelée) et de freezes récurrents.
-               Qt supprime toute la couche .NET.
-      Linux    Pas de backend natif → Qt est le seul installable via pip.
-      macOS    Cocoa/WebKit via pyobjc (natif) + PyQt6 en filet (Mac headless).
-    """
-    _s = platform.system()
-    if _s == "Darwin":
-        return [
-            ("WebKit",                    "pyobjc-framework-WebKit"),
-            ("Cocoa",                     "pyobjc-framework-Cocoa"),
-            ("PyQt6",                     "PyQt6"),
-            ("PyQt6.QtWebEngineWidgets",  "PyQt6-WebEngine"),
-            ("qtpy",                      "qtpy"),
-        ]
-    if _s in ("Linux", "Windows"):
-        return [
-            ("PyQt6",                     "PyQt6"),
-            ("PyQt6.QtWebEngineWidgets",  "PyQt6-WebEngine"),
-            ("qtpy",                      "qtpy"),
-        ]
-    return []
-
-
-# Les deps GUI plateforme sont critiques : sans backend, la GUI ne se lance pas.
-_DEPS_CRITIQUES += _gui_deps_plateforme()
 
 
 def _resoudre_mode_bootstrap():
@@ -206,7 +176,7 @@ def _imports_manquants(deps):
         try:
             return importlib.util.find_spec(mod) is None
         except (ImportError, ValueError):
-            # ValueError : module parent absent (PyQt6.X quand PyQt6 manque)
+            # ValueError : module parent absent (paquet.X quand le paquet manque)
             return True
     return [pkg for mod, pkg in deps if _absent(mod)]
 
@@ -1170,8 +1140,9 @@ def clear_history() -> bool:
 
 
 # Préférences UI persistées (langue). Override manuel du toggle FR/EN ; absente
-# = auto-détection par navigator.language côté JS. Pas en localStorage : sous
-# QtWebEngine packagé il peut être éphémère ; un desktop range ses prefs en fichier.
+# = auto-détection par navigator.language côté JS. Pas en localStorage : lié
+# à l'origine, donc au port, il changerait avec chaque nouvelle instance ; un
+# desktop range ses prefs en fichier.
 def load_lang():
     """Retourne 'fr'/'en' si une préférence est sauvée, sinon None (= auto-détection JS)."""
     try:
@@ -5029,38 +5000,341 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
         log_func(f"ERROR: {e}")
         raise
 
-def show_form(args, tz_finder, output_default):
-    """
-    Interface graphique PyWebView (HTML/CSS/JS) — style identique à lidar2map.py.
-    Communication bidirectionnelle Python <-> JS via l'objet Api exposé.
-    """
-    # Forcer le backend Qt AVANT d'importer webview (pywebview peut lire
-    # PYWEBVIEW_GUI dès l'import). Windows+Linux : Qt au lieu de WinForms/.NET ;
-    # macOS : laissé au runtime hook du .app. En frozen, le runtime hook le pose
-    # déjà encore plus tôt — ceci fiabilise le mode `python gpxsolar.py` (dev).
-    if platform.system() in ("Windows", "Linux"):
-        os.environ.setdefault("PYWEBVIEW_GUI", "qt")
-    import webview
-    import json
+# ── Interface dans le navigateur (depuis la 1.6.0) ────────────────────────
+# Jusqu'à la 1.5, l'interface était une fenêtre pywebview + Qt : PyQt6 et
+# QtWebEngine pesaient 557 Mo sur les 941 du programme. Elle est désormais
+# servie en HTTP local et ouverte dans le navigateur, avec les techniques de
+# lidar2map, son jumeau, qui a fait cette migration le premier : même module
+# _serve_web.py (bibliothèque standard), même pont gui/web_bridge.js, même
+# icône de zone de notification (pystray), même choix entre rejoindre
+# l'instance en cours et en démarrer une nouvelle. Écarts : pas d'accès
+# distant (écoute sur la boucle locale seulement), libellés de l'icône en
+# deux langues comme ceux de blink2video.
 
-    # Dérivée de la constante VERSION (source unique) : l'ancien "v28.5" était
-    # un compteur interne divergent de la version publiée.
+# Ports de départ des quatre applications, distincts pour qu'elles tournent
+# ensemble : blink2video 8765, lidar2map 8766, watch2notif 8767, gpxsolar 8768.
+PORT_GUI = 8768
+HOTE_GUI = "127.0.0.1"
+
+# Un serveur = une instance Api = un seul calcul actif à la fois. Un second
+# lancement trouve le port pris : _instance_existante() reconnaît alors une
+# instance gpxsolar (et pas un service tiers) pour proposer de la rejoindre
+# ou d'en démarrer une nouvelle, sur le premier port libre de cette plage
+# (même pattern que Jupyter Notebook et lidar2map).
+PORT_RANGE_SIZE = 10
+
+SCRIPT = (Path(sys.executable).resolve() if getattr(sys, "frozen", False)
+          else Path(__file__).resolve())
+
+TRAY_LIBELLES = {
+    "fr": ("Ouvrir", "Redémarrer", "Arrêter"),
+    "en": ("Open", "Restart", "Stop"),
+}
+
+
+def _construire_parser_serve_gui():
+    """Parser du mode --serve-gui, à part de main() : ses options ne sont
+    pas celles du calcul, et les tests le relisent sans rien démarrer."""
+    parser = argparse.ArgumentParser(
+        prog="gpxsolar --serve-gui",
+        description="Serves the gpxsolar interface over local HTTP and opens "
+                    "it in the browser. Default mode of a launch without "
+                    "arguments.")
+    parser.add_argument("--serve-gui", action="store_true",
+                        help="Web interface mode (this mode)")
+    parser.add_argument("--port", type=int, default=PORT_GUI, metavar="N",
+                        help=f"Starting port (default {PORT_GUI}). If an "
+                             "instance already runs there, you are asked "
+                             "whether to join it or start a new one (up to "
+                             f"{PORT_RANGE_SIZE - 1} following ports tried)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Do not open the browser automatically (scripted use)")
+    parser.add_argument("--no-tray", action="store_true",
+                        help="No system tray icon (scripted or headless use); "
+                             "Ctrl+C is then the only way to stop. Automatic "
+                             "when the icon is unavailable (Linux without a "
+                             "display)")
+    parser.add_argument("--new-instance", action="store_true",
+                        help="Start a new server on the first free port even "
+                             "if an instance is already running, without "
+                             "asking (parallel computation)")
+    return parser
+
+
+def _resoudre_gui_dir() -> Path:
+    """Dossier gui/ (index.html, style.css, web_bridge.js, app.js), figé ou
+    source : dans _internal/ une fois figé, sinon à côté de gpxsolar.py."""
+    bases = []
+    _mp = getattr(sys, "_MEIPASS", None)
+    if _mp:
+        bases.append(Path(_mp))
+    if "__file__" in globals():
+        bases.append(Path(__file__).resolve().parent)
+    bases.append(Path(sys.argv[0]).resolve().parent)
+    for base in bases:
+        if (base / "gui" / "index.html").exists():
+            return base / "gui"
+    raise RuntimeError("GUI not found: gui/index.html missing (assets not "
+                       f"bundled?). Searched: {[str(b) for b in bases]}")
+
+
+def _api_browse_dir(path: str = "", kind: str = "", exts=None, mode: str = "") -> dict:
+    """Parcours des dossiers côté serveur, repris de lidar2map : remplace le
+    sélecteur de fichier natif de pywebview (retiré). Un navigateur ne peut
+    pas parcourir le disque du SERVEUR : on liste ici, /api/browse-dir sert
+    la liste, gui/app.js navigue dedans (voir browseOuvrir()).
+
+    path vide ou invalide -> dossier Documents de l'utilisateur, plutôt
+    qu'une erreur : c'est une navigation, pas une action destructive.
+    mode='file' : les fichiers sont listés en plus des sous-dossiers, filtrés
+    par exts s'il y en a. `kind` (racines par type de dossier chez
+    lidar2map) est accepté pour garder la même route, sans usage ici."""
+    base = Path(path).expanduser() if path else _dossiers._documents()
+    try:
+        base = base.resolve()
+        if not base.is_dir():
+            raise ValueError
+    except (OSError, ValueError):
+        base = Path.home().resolve()
+    extensions = tuple(str(e).lower() for e in (exts or []))
+    dossiers, fichiers = [], []
+    try:
+        for entree in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+            if entree.is_dir():
+                dossiers.append(entree.name)
+            elif mode == "file" and (not extensions or entree.name.lower().endswith(extensions)):
+                fichiers.append(entree.name)
+    except OSError:
+        pass
+    parent = str(base.parent) if base.parent != base else None
+    return {"path": str(base), "parent": parent, "dirs": dossiers, "files": fichiers}
+
+
+def _instance_existante(port: int, timeout: float = 1.0) -> bool:
+    """Vrai si un serveur gpxsolar (et pas un service tiers qui occuperait
+    ce port par coïncidence) répond déjà sur ce port."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                f"http://{HOTE_GUI}:{port}/api/init", timeout=timeout) as reponse:
+            return json.loads(reponse.read()).get("app") == "gpxsolar"
+    except Exception:
+        return False
+
+
+def _port_libre(port: int) -> bool:
+    """Vrai si ``port`` peut être écouté sur la boucle locale à cet instant."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sonde:
+        if os.name != "nt":
+            # Même règle que _serve_web.Server.allow_reuse_address.
+            sonde.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sonde.bind((HOTE_GUI, port))
+        except OSError:
+            return False
+    return True
+
+
+def _premier_port_libre(port_depart: int, gui_dir: Path, api_routes: dict,
+                        post_routes: dict):
+    """Essaie port_depart puis les suivants dans PORT_RANGE_SIZE, retourne
+    (server, port) sur le premier qui accepte, ou (None, None) si toute la
+    plage est prise."""
+    import _serve_web
+    for port in range(port_depart, port_depart + PORT_RANGE_SIZE):
+        try:
+            server = _serve_web.demarrer(
+                bind=HOTE_GUI, port=port, trusted_host="",
+                gui_dir=gui_dir, api_routes=api_routes, post_routes=post_routes,
+            )
+            return server, port
+        except OSError:
+            continue
+    return None, None
+
+
+def _construire_tray_icon(gui_dir: Path, on_open, on_restart, on_stop, lang="en"):
+    """Icône de zone de notification (Ouvrir/Redémarrer/Arrêter) pendant que
+    le serveur web tourne dans son thread de fond. pystray + Pillow
+    seulement : Pillow est déjà une dépendance de gpxsolar, et pystray parle
+    directement l'API native de chaque OS, à l'inverse de pywebview/Qt.
+
+    Menu fixe, jamais modifié hors du thread principal : sous macOS, AppKit
+    n'admet les changements d'interface que depuis ce thread, et macOS 27
+    tue le processus sinon (vu sur blink2video, issue #31)."""
+    import pystray
+    from PIL import Image
+    ouvrir, redemarrer, arreter = TRAY_LIBELLES.get(lang, TRAY_LIBELLES["en"])
+    image = Image.open(gui_dir / "gpxsolar_icon.png")
+    menu = pystray.Menu(
+        pystray.MenuItem(ouvrir, on_open, default=True),
+        pystray.MenuItem(redemarrer, on_restart),
+        pystray.MenuItem(arreter, on_stop),
+    )
+    return pystray.Icon("gpxsolar", image, "gpxsolar", menu)
+
+
+def _commande_relance(*, frozen, executable, argv):
+    """Commande qui relance ce même serveur avec les mêmes arguments.
+
+    Figé, ``argv[0]`` ne désigne PAS l'exécutable : _loader.py le remplace
+    par le chemin de ``_internal/gpxsolar.py`` (texte, ni exécutable ni
+    lançable par CreateProcess sous Windows). On relance donc l'exe courant
+    (``executable``), qui depuis la 1.5 est le programme lui-même."""
+    if frozen:
+        return [executable] + list(argv[1:])
+    return [executable] + list(argv)
+
+
+def _relancer_process():
+    """Relance un nouveau process avec les mêmes arguments, pour un
+    Redémarrer depuis l'icône. Le process courant doit avoir déjà libéré le
+    port (server.server_close()) avant cet appel, sinon le nouveau échouerait
+    à écouter dessus.
+
+    CREATE_NO_WINDOW seul, jamais combiné à DETACHED_PROCESS : la
+    combinaison rendait le lancement erratique, constaté en réel sur
+    watch2notif (2026-09-07) pour ce même besoin, un process qui doit
+    survivre à son parent, lancé sans fenêtre visible."""
+    commande = _commande_relance(
+        frozen=getattr(sys, "frozen", False),
+        executable=sys.executable,
+        argv=sys.argv,
+    )
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    subprocess.Popen(
+        commande, cwd=os.getcwd(), close_fds=True, creationflags=flags,
+    )
+
+
+def _langue_console() -> str:
+    """'fr' ou 'en' pour la question posée dans le terminal et les libellés
+    de l'icône : langue choisie dans l'interface si elle est enregistrée,
+    sinon langue du système."""
+    lang = load_lang()
+    if lang in ("fr", "en"):
+        return lang
+    import locale
+    try:
+        systeme = (locale.getlocale()[0] or "").lower()
+    except (ValueError, TypeError):
+        systeme = ""
+    systeme = systeme or os.environ.get("LANG", "").lower()
+    return "fr" if systeme.startswith(("fr", "french")) else "en"
+
+
+def _textes_instance_existante(lang):
+    """(question, annonce) du choix rejoindre / nouvelle instance ; « N »
+    répond « nouvelle » dans les deux langues (Non / New)."""
+    if lang == "fr":
+        return ("  [O] La rejoindre dans le navigateur (défaut)   "
+                "[N] En démarrer une nouvelle sur un autre port, pour un "
+                "calcul en parallèle : ",
+                "  Une instance gpxsolar tourne déjà sur {url}")
+    return ("  [Y] Join it in the browser (default)   "
+            "[N] Start a new one on another port, for a parallel computation : ",
+            "  A gpxsolar instance is already running at {url}")
+
+
+def _console_windows_visible() -> bool:
+    """Vrai si ce processus a une fenêtre de console visible (Windows)."""
+    try:
+        import ctypes
+        fenetre = ctypes.windll.kernel32.GetConsoleWindow()
+        return bool(fenetre) and bool(ctypes.windll.user32.IsWindowVisible(fenetre))
+    except Exception:
+        return False
+
+
+def _terminal_interactif(*, stdin=None, plateforme=None,
+                         console_visible=None) -> bool:
+    """Vrai si une question posée dans le terminal sera vue et répondue.
+
+    isatty() ne suffit pas sous Windows : lancé par double-clic, l'exe garde
+    une console masquée (hide_console des specs) ou sans fenêtre
+    (CREATE_NO_WINDOW) ; personne n'y verrait la question, qui passe alors
+    par la page."""
+    stdin = sys.stdin if stdin is None else stdin
+    try:
+        if not stdin.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if (plateforme or sys.platform) != "win32":
+        return True
+    return (console_visible or _console_windows_visible)()
+
+
+def _demarrer_nouvelle_instance(*, port_depart, sans_icone=False,
+                                delai_s=30.0, popen=None,
+                                instance_existante=None, attendre=time.sleep):
+    """Bouton « Nouvelle instance » de la page : démarre un second serveur
+    (--new-instance --no-browser) sur le premier port libre à partir de
+    ``port_depart``, puis attend qu'il réponde. Retourne {"ok": True,
+    "port": N} ; la page ouvre alors l'onglet elle-même.
+
+    Processus détaché, sans fenêtre ni console (mêmes drapeaux que
+    _relancer_process) : il vit indépendamment de celui-ci et s'arrête par
+    sa propre icône ; refusé quand ce serveur tourne lui-même sans icône
+    (--no-tray), l'instance ne pourrait pas être arrêtée."""
+    if sans_icone:
+        return {"ok": False, "error": (
+            "Without a system tray icon (--no-tray), an instance started from "
+            "here could not be stopped: start it in a terminal with "
+            "--serve-gui --new-instance.")}
+    popen = popen or subprocess.Popen
+    instance_existante = instance_existante or _instance_existante
+    port = next((p for p in range(port_depart, port_depart + PORT_RANGE_SIZE)
+                 if _port_libre(p)), None)
+    if port is None:
+        return {"ok": False, "error": (
+            f"No free port from {port_depart} to "
+            f"{port_depart + PORT_RANGE_SIZE - 1}.")}
+    base = ([str(SCRIPT)] if getattr(sys, "frozen", False)
+            else [sys.executable, str(SCRIPT)])
+    commande = base + ["--serve-gui", "--new-instance", "--port", str(port),
+                       "--no-browser"]
+    options = {"cwd": os.getcwd(), "close_fds": True,
+               "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+               "stderr": subprocess.DEVNULL}
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        options["start_new_session"] = True
+    try:
+        processus = popen(commande, **options)
+    except OSError as exc:
+        return {"ok": False, "error": f"Could not start: {exc}"}
+    fin = time.monotonic() + delai_s
+    while time.monotonic() < fin:
+        if instance_existante(port):
+            return {"ok": True, "port": port}
+        if processus.poll() is not None:
+            return {"ok": False, "error": (
+                f"The new instance stopped while starting "
+                f"(code {processus.returncode}).")}
+        attendre(0.25)
+    return {"ok": False, "error": (
+        f"The new instance does not answer on port {port} "
+        f"after {delai_s:.0f} s.")}
+
+
+def main_serve_gui(args, options):
+    """Mode par défaut (lancement sans argument) et --serve-gui explicite :
+    sert gui/ sur HTTP local et ouvre le navigateur dessus, comme lidar2map.
+    Une seule Api pour toute la durée du process : launch/stop/poll_log
+    partagent son état (sous-processus du calcul, file du journal).
+
+    `args` : valeurs par défaut du moteur, celles du parser principal, avec
+    les dossiers déjà préparés ; `options` : celles du mode --serve-gui."""
     APP_VERSION = f"v{VERSION}"
-    config = load_config()
 
-    # Supprimer les warnings internes pywebview (AccessibilityObject, COM, etc.)
-    for _name in ("pywebview", "pywebview.window", "pywebview.util",
-                  "pywebview.platforms", "pywebview.js"):
-        _lg = logging.getLogger(_name)
-        _lg.setLevel(logging.CRITICAL)
-        _lg.handlers.clear()
-        _lg.propagate = False
-
-    # File de logs partagée entre le logger Python et JS (via polling).
+    # File de logs partagée entre le logger Python et la page (via polling).
     log_queue = queue.Queue()
 
     class GuiQueueHandler(logging.Handler):
-        """Handler logging → JSON-friendly items dans log_queue."""
+        """Handler logging → items JSON dans log_queue."""
         LEVEL_TAG = {
             logging.DEBUG: "dim", logging.INFO: "ok",
             logging.WARNING: "warn", logging.ERROR: "err",
@@ -5079,13 +5353,12 @@ def show_form(args, tz_finder, output_default):
     gui_handler.setLevel(logging.INFO)
     gui_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
-    # Éviter doublon si show_form rappelée
     for h in list(logging.getLogger().handlers):
         if isinstance(h, GuiQueueHandler):
             logging.getLogger().removeHandler(h)
     logging.getLogger().addHandler(gui_handler)
 
-    # Données statiques pour le formulaire HTML
+    # Données statiques du formulaire.
     DEM_SOURCES = [
         {"key": k,
          "label": f"{info['name']} ({info['resolution']} m)",
@@ -5114,29 +5387,33 @@ def show_form(args, tz_finder, output_default):
         {'name': 'Jaune', 'color': '#FFFF00', 'description': 'Tuile sur disque (pas en RAM)','i18n': 'leg.tyellow'},
     ]
 
-    INIT_DEFAULTS = {
-        'gpx_file': config.get('gpx_file', ''),
-        'date': config.get('date', datetime.now().strftime("%d/%m/%Y")),
-        'time': config.get('time', '09:00'),
-        'dem_source': config.get('dem_source', args.dem_source),
-        'analysis_resolution': str(config.get('analysis_resolution', args.analysis_resolution)),
-        'shadow_mode': config.get('shadow_mode', 'both'),
-        'direction': config.get('direction', 'both'),
-        'open_gpx': bool(config.get('open_gpx', True)),
-        'max_distance': str(config.get('max_distance', '1000')),
-        'margin_meters': str(config.get('margin_meters', '500')),
-        'batch_size': str(config.get('batch_size', '256')),
-        'passage_interval_min': str(config.get('passage_interval_min',
-                                               getattr(args, 'passage_interval_min', 0))),
-        'solar_step_s': str(config.get('solar_step_s', '60')),
-        'visualize_tiles': bool(config.get('visualize_tiles', False)),
-        'generate_shadow_map': bool(config.get('generate_shadow_map', False)),
-        'analysis_type': config.get('analysis_type', 'ombre_soleil'),
-        'num_workers': str(config.get('num_workers', DEFAULT_NUM_WORKERS)),
-        'visualize_sun_rays': bool(config.get('visualize_sun_rays', False)),
-        'sun_ray_interval': str(config.get('sun_ray_interval', '20')),
-        'show_slope_arrows': bool(config.get('show_slope_arrows', False)),
-    }
+    def _init_defaults():
+        # Relu à chaque /api/init, pas figé au démarrage : une page rechargée
+        # après un calcul retrouve la configuration qu'il a enregistrée.
+        config = load_config()
+        return {
+            'gpx_file': config.get('gpx_file', ''),
+            'date': config.get('date', datetime.now().strftime("%d/%m/%Y")),
+            'time': config.get('time', '09:00'),
+            'dem_source': config.get('dem_source', args.dem_source),
+            'analysis_resolution': str(config.get('analysis_resolution', args.analysis_resolution)),
+            'shadow_mode': config.get('shadow_mode', 'both'),
+            'direction': config.get('direction', 'both'),
+            'open_gpx': bool(config.get('open_gpx', True)),
+            'max_distance': str(config.get('max_distance', '1000')),
+            'margin_meters': str(config.get('margin_meters', '500')),
+            'batch_size': str(config.get('batch_size', '256')),
+            'passage_interval_min': str(config.get('passage_interval_min',
+                                                   getattr(args, 'passage_interval_min', 0))),
+            'solar_step_s': str(config.get('solar_step_s', '60')),
+            'visualize_tiles': bool(config.get('visualize_tiles', False)),
+            'generate_shadow_map': bool(config.get('generate_shadow_map', False)),
+            'analysis_type': config.get('analysis_type', 'ombre_soleil'),
+            'num_workers': str(config.get('num_workers', DEFAULT_NUM_WORKERS)),
+            'visualize_sun_rays': bool(config.get('visualize_sun_rays', False)),
+            'sun_ray_interval': str(config.get('sun_ray_interval', '20')),
+            'show_slope_arrows': bool(config.get('show_slope_arrows', False)),
+        }
 
     class Api:
         # Le calcul tourne dans un SOUS-PROCESSUS (ce programme relancé en mode
@@ -5153,12 +5430,6 @@ def show_form(args, tz_finder, output_default):
             self._progress = {"value": 0, "text": "En attente..."}
             self._t_launch = None
             self._cfg_launch = None
-            self.window = None
-
-        def _get_window(self):
-            if self.window is None and webview.windows:
-                self.window = webview.windows[0]
-            return self.window
 
         def get_historique(self):
             return load_history()
@@ -5170,19 +5441,6 @@ def show_form(args, tz_finder, output_default):
         def set_lang(self, code):
             """Persiste l'override manuel de langue de l'UI (toggle FR/EN)."""
             return {"ok": save_lang(code)}
-
-        def pick_gpx(self):
-            w = self._get_window()
-            if not w:
-                return ""
-            try:
-                r = w.create_file_dialog(
-                    webview.OPEN_DIALOG,
-                    file_types=("GPX files (*.gpx)", "All files (*.*)"))
-                return r[0] if r else ""
-            except Exception as e:
-                logging.warning(f"pick_gpx error: {e}")
-                return ""
 
         def poll_log(self):
             items = []
@@ -5406,139 +5664,176 @@ def show_form(args, tz_finder, output_default):
 
     api = Api()
 
-    # Données initiales injectées directement dans la page (rendu synchrone,
-    # pas de dépendance à un appel async pywebview.api avant l'affichage).
-    init_data = {
-        "defaults": INIT_DEFAULTS,
-        "dem_sources": DEM_SOURCES,
-        "kml_legend": KML_LEGEND,
-        "slope_legend": SLOPE_LEGEND,
-        "tile_legend": TILE_LEGEND,
-        "time_options": generate_time_options(),
-        "version": APP_VERSION,
-        "historique": load_history(),
-        "lang": load_lang(),   # None = auto-détection JS (navigator.language)
-        # (texte d'aide déplacé dans le dico I18N JS — clé help.body)
+    def _init_data():
+        # "app" : ce que _instance_existante() interroge pour distinguer « un
+        # gpxsolar tourne déjà sur ce port » d'« un service tiers occupe ce
+        # port par coïncidence ». "pid" : quel processus répond.
+        return {
+            "app": "gpxsolar",
+            "version": APP_VERSION,
+            "pid": os.getpid(),
+            "defaults": _init_defaults(),
+            "dem_sources": DEM_SOURCES,
+            "kml_legend": KML_LEGEND,
+            "slope_legend": SLOPE_LEGEND,
+            "tile_legend": TILE_LEGEND,
+            "time_options": generate_time_options(),
+            "historique": load_history(),
+            "lang": load_lang(),   # None = auto-détection JS (navigator.language)
+        }
+
+    def _launch(cfg):
+        if not isinstance(cfg, dict):
+            return {"error": "cfg invalide"}
+        return api.launch(cfg)
+
+    def _stop(_payload):
+        api.stop()
+        return {"ok": True}
+
+    def _set_lang(payload):
+        return api.set_lang((payload or {}).get("code"))
+
+    # Port réel connu seulement après le démarrage du serveur (plus bas) :
+    # la route le lit au moment de l'appel.
+    etat_serveur = {"port": None, "sans_icone": False}
+
+    def _new_instance(_payload):
+        return _demarrer_nouvelle_instance(
+            port_depart=etat_serveur["port"] + 1,
+            sans_icone=options.no_tray or etat_serveur.get("sans_icone", False))
+
+    api_routes = {
+        "init": _init_data,
+        "historique": api.get_historique,
+        "last-error": api.get_last_error,
+        "poll-log": api.poll_log,
+        "browse-dir": _api_browse_dir,
     }
-    init_json = json.dumps(init_data, ensure_ascii=False).replace("</", "<\\/")
-    HTML = _build_gpxsolar_html().replace(
-        "/*__INIT_DATA__*/",
-        f"window.INIT_DATA = {init_json};"
-    )
+    post_routes = {
+        "launch": _launch,
+        "stop": _stop,
+        "clear-historique": lambda _payload: api.clear_historique(),
+        "set-lang": _set_lang,
+        "new-instance": _new_instance,
+    }
 
-    # Muselle l'avertissement bénin de fermeture QtWebEngine
-    # ("Release of profile requested but WebEnginePage still not deleted") :
-    # ordre de destruction géré par pywebview, sans conséquence. Un handler de
-    # messages Qt filtre uniquement ce message ; tout le reste passe.
-    # (PYWEBVIEW_GUI=qt est déjà posé avant `import webview`, plus haut.)
-    if platform.system() in ("Windows", "Linux"):
+    # Un gpxsolar tourne peut-être déjà sur le port de départ : un second
+    # lancement le rejoint par défaut, ou en démarre un nouveau pour un
+    # calcul en parallèle. La question se pose dans le terminal s'il y en a
+    # un de visible, sinon DANS LA PAGE : l'instance existante s'ouvre avec
+    # ?deja-ouverte=1, et la page propose d'y continuer ou d'en démarrer une
+    # nouvelle. Jamais de second serveur démarré en silence.
+    gui_dir = _resoudre_gui_dir()
+    port_depart = options.port
+    if not options.new_instance and _instance_existante(port_depart):
+        url_existante = f"http://{HOTE_GUI}:{port_depart}/"
+        nouvelle = False
+        interactif = not options.no_browser and _terminal_interactif()
+        if interactif:
+            question, deja = _textes_instance_existante(_langue_console())
+            print(deja.format(url=url_existante))
+            try:
+                nouvelle = input(question).strip().lower() == "n"
+            except EOFError:
+                nouvelle = False
+        if not nouvelle:
+            if options.no_browser:
+                print(f"  A gpxsolar instance is already running at "
+                      f"{url_existante} - nothing to start (--no-browser; "
+                      f"use --new-instance for a parallel server).")
+                return
+            import webbrowser
+            webbrowser.open(url_existante if interactif
+                            else url_existante + "?deja-ouverte=1")
+            print("  Opened in the browser. Not starting a new server.")
+            return
+        port_depart = options.port + 1
+
+    server, port = _premier_port_libre(port_depart, gui_dir, api_routes, post_routes)
+    if server is None:
+        derniere = port_depart + PORT_RANGE_SIZE - 1
+        print(f"  Could not listen on {HOTE_GUI}: every port from "
+              f"{port_depart} to {derniere} is already in use.")
+        sys.exit(1)
+
+    etat_serveur["port"] = port
+    url = f"http://{HOTE_GUI}:{port}/"
+    print(f"  gpxsolar web GUI: {url}")
+    if not options.no_browser:
+        import webbrowser
+        # Délai : laisser le serveur réellement démarrer avant l'ouverture
+        # (thread non bloquant, mêmes paramètres que blink2video et lidar2map).
+        threading.Timer(0.5, webbrowser.open, [url]).start()
+
+    def _arreter_le_calcul_et_le_serveur():
+        proc = api._proc
+        if proc and proc.poll() is None:
+            print("  Server stopping - stopping the running computation...", flush=True)
+            api.stop()
+            try:
+                proc.wait(timeout=20)
+            except Exception:
+                pass
+        server.shutdown()
+        server.server_close()
+
+    # Icône de zone de notification : moyen d'arrêter dans ce mode (pas de
+    # garantie qu'un Ctrl+C interrompe proprement la boucle native de
+    # pystray selon l'OS, contrairement à time.sleep() ci-dessous - deux
+    # chemins complets et séparés plutôt qu'un mélange fragile des deux).
+    action = {"quoi": "stop"}
+
+    def _on_open(icon, item):
+        import webbrowser
+        webbrowser.open(url)
+
+    def _on_restart(icon, item):
+        action["quoi"] = "restart"
+        icon.stop()
+
+    def _on_stop(icon, item):
+        action["quoi"] = "stop"
+        icon.stop()
+
+    icon = None
+    if not options.no_tray:
         try:
-            from PyQt6 import QtCore as _QtCore
-            _QT_NOISE = ("WebEnginePage still not deleted",
-                         "Release of profile requested")
+            icon = _construire_tray_icon(gui_dir, _on_open, _on_restart, _on_stop,
+                                         lang=_langue_console())
+        except Exception as exc:
+            # Linux sans affichage (SSH, session sans bureau) : pystray tente
+            # une connexion X dès l'import et lève. Le serveur tournait déjà :
+            # continuer sans icône plutôt que de s'arrêter.
+            print(f"  System tray icon unavailable ({type(exc).__name__}: {exc})"
+                  f" - running without it.")
+            etat_serveur["sans_icone"] = True
 
-            def _qt_msg_filter(_mode, _ctx, _msg):
-                if any(_n in _msg for _n in _QT_NOISE):
-                    return
-                try:
-                    sys.stderr.write(str(_msg) + "\n")
-                except Exception:
-                    pass
-
-            _QtCore.qInstallMessageHandler(_qt_msg_filter)
-        except Exception:
-            pass
-
-    # Taille initiale bornée à l'écran : avec le backend Qt + mise à l'échelle
-    # DPI, une hauteur fixe (860) peut dépasser un écran de portable (ex. 1080p
-    # à 150 % = 720 px logiques) -> fenêtre hors écran. On clampe sur la zone de
-    # travail (hors barre des tâches) sous Windows. Fenêtre redimensionnable.
-    _w, _h = 1180, 860
-    try:
-        if platform.system() == "Windows":
-            import ctypes
-            from ctypes import wintypes
-            _r = wintypes.RECT()
-            ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(_r), 0)  # SPI_GETWORKAREA
-            _wa_w, _wa_h = _r.right - _r.left, _r.bottom - _r.top
-            if _wa_h > 0:
-                _h = max(560, min(_h, _wa_h - 48))
-                _w = max(900, min(_w, _wa_w - 48))
-    except Exception:
-        pass
-
-    win = webview.create_window(
-        f"Simu Rando Solaire {APP_VERSION}",
-        html=HTML,
-        js_api=api,
-        width=_w, height=_h,
-        min_size=(900, 560),
-        zoomable=True,
-    )
-    api.window = win
-
-    def _au_close():
-        """Fermeture de la fenêtre : tuer un calcul en cours, puis sortie
-        INCONDITIONNELLE via os._exit(0). Sans ce _exit, le process GUI survit à
-        la fenêtre sous Qt/QtWebEngine (threads/QtWebEngineProcess qui traînent),
-        et en dev le parent bloqué sur subprocess.run(venv) laisse le terminal
-        occupé sur les lignes de bootstrap. Les écritures critiques (config,
-        historique) sont atomiques et déjà faites, donc _exit est sûr. Modèle
-        identique au jumeau lidar2map."""
+    if icon is None:
+        print("  Ctrl+C to stop.")
         try:
-            proc = getattr(api, "_process", None) or getattr(api, "_proc", None)
-            if proc and proc.poll() is None:
-                api.stop()
-                try:
-                    proc.wait(timeout=8)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        os._exit(0)
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            _arreter_le_calcul_et_le_serveur()
+            print("\n  Web GUI server stopped.")
+            sys.exit(0)
 
-    win.events.closed += _au_close
-    # debug=True -> DevTools accessibles (clic droit -> Inspecter / F12). Via --debug.
-    webview.start(debug=bool(getattr(args, "debug", False)))
-    # Filet : si l'événement `closed` n'a pas été délivré mais que start() rend
-    # la main, on repasse par le même chemin d'extinction (os._exit).
-    _au_close()
+    print("  Look for the gpxsolar icon in the system tray.")
+    icon.run()  # bloque jusqu'à icon.stop() (Redémarrer ou Arrêter)
 
-
-def _build_gpxsolar_html():
-    """Assemble le HTML du formulaire pywebview depuis gui/ : index.html +
-    style.css + app.js, réunis via des sentinelles d'insertion. Le front est
-    séparé du .py (comme le jumeau lidar2map) pour la lisibilité et le tooling
-    (coloration, lint, diffs propres). La sentinelle /*__INIT_DATA__*/ reste
-    dans index.html : show_form y injecte les données initiales après coup."""
-    bases = []
-    _mp = getattr(sys, "_MEIPASS", None)
-    if _mp:
-        bases.append(_mp)                                   # frozen : _internal/
-    if "__file__" in globals():
-        bases.append(os.path.dirname(os.path.abspath(__file__)))  # source
-    bases.append(os.path.dirname(os.path.abspath(sys.argv[0])))
-    gui_dir = next((os.path.join(b, "gui") for b in bases
-                    if os.path.exists(os.path.join(b, "gui", "index.html"))), None)
-    if gui_dir is None:
-        raise RuntimeError("GUI introuvable : gui/index.html absent "
-                           f"(assets non bundlés ?). Cherché dans : {bases}")
-
-    def _read(name):
-        with open(os.path.join(gui_dir, name), encoding="utf-8") as fh:
-            return fh.read()
-
-    html = _read("index.html")
-    html = html.replace("/*__GPXSOLAR_CSS__*/", _read("style.css"))
-    html = html.replace("//__GPXSOLAR_JS__", _read("app.js"))
-    return html
+    _arreter_le_calcul_et_le_serveur()
+    if action["quoi"] == "restart":
+        _relancer_process()
+    print("\n  Web GUI server stopped.")
+    sys.exit(0)
 
 
 def run_headless(args, tz_finder):
     """Calcul en ligne de commande (sans GUI), même méthode que lidar2map :
-    déclenché dès qu'un argument est passé. Requiert --gpx, --date, --time.
-    Appelle directement run_gui_process (le moteur de calcul, indépendant de
-    pywebview) puis retourne un code de sortie (0 = succès)."""
+    déclenché par tout argument autre que --serve-gui. Requiert --gpx,
+    --date, --time. Appelle directement run_gui_process (le moteur de calcul,
+    indépendant de l'interface) puis retourne un code de sortie (0 = succès)."""
     if not args.gpx:
         logging.error("Command-line mode: --gpx is required (with --date "
                       "JJ/MM/AAAA et --time HH:MM). Lancez sans argument pour "
@@ -5699,11 +5994,11 @@ def main():
                        help='Maximum shadow detection distance (in metres, default: 1000)')
     parser.add_argument('--profile', action='store_true', help='Enable performance profiling.')
     parser.add_argument('--temp-dir', type=str, default=tempfile.gettempdir(), help='Temporary directory for profiling reports.')
-    parser.add_argument('--debug', action='store_true', help='Open the pywebview DevTools (right-click -> Inspect / F12) to see the JS console and the bridge.')
 
     # --- Mode ligne de commande (headless), même méthode que lidar2map ---------
-    # Sans argument -> GUI. Dès qu'un argument est passé, on bascule en mode CLI
-    # (calcul direct sans fenêtre). Le calcul a besoin de --gpx + --date + --time.
+    # Sans argument (ou avec --serve-gui et ses options) -> interface dans le
+    # navigateur. Sinon, calcul direct sans interface, qui a besoin de --gpx,
+    # --date et --time.
     grp_cli = parser.add_argument_group(
         'Command-line mode (headless)',
         "Passing --gpx (with --date and --time) runs the computation without a "
@@ -5741,7 +6036,13 @@ def main():
     grp_cli.add_argument('--open', action='store_true',
                          help='Open the result when done (Windows only).')
 
-    args = parser.parse_args()
+    # Mode décidé avant l'analyse : les options de l'interface (--serve-gui
+    # --port N...) ne sont pas celles du calcul. En mode interface, le parser
+    # principal ne fournit que ses valeurs par défaut, celles que le calcul
+    # lancé depuis la page reprend.
+    mode_gui = len(sys.argv) == 1 or "--serve-gui" in sys.argv[1:]
+    options_gui = _construire_parser_serve_gui().parse_args() if mode_gui else None
+    args = parser.parse_args([] if mode_gui else None)
     
     # --- Début de la modification du logging ---
     # Supprimer tous les handlers existants pour éviter les duplications
@@ -5781,11 +6082,8 @@ def main():
 
     tz_finder = _LazyTimezoneFinder()
 
-    # Mode (même méthode que lidar2map) : sans argument (ou --debug seul, qui est
-    # un flag GUI/DevTools) -> interface graphique ; sinon -> calcul headless.
-    _is_only_debug = (len(sys.argv) == 2 and sys.argv[1] == "--debug")
-    if len(sys.argv) == 1 or _is_only_debug:
-        show_form(args, tz_finder, args.output)
+    if mode_gui:
+        main_serve_gui(args, options_gui)
     else:
         sys.exit(run_headless(args, tz_finder))
 
