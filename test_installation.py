@@ -4,19 +4,24 @@ Ce qu'un lanceur <= 1.4 laissait (son extraction, son bundle zippé) est
 retiré au démarrage, jamais le dossier d'où tourne le programme ; les
 fichiers de Qt que la 1.5.0 laisse dans _internal aussi, seulement eux ; et
 --desinstaller ne supprime jamais le programme lui-même. Fichiers réels dans
-un dossier temporaire, jamais les vrais dossiers de l'utilisateur.
+un dossier temporaire, jamais les vrais dossiers de l'utilisateur. Sous
+Linux, les programmes du système lancés par le binaire retrouvent leur
+LD_LIBRARY_PATH d'origine.
 
 Exécution :
     python test_installation.py
 """
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import _installation
+
+RACINE = Path(__file__).resolve().parent
 
 
 class DossierProgramme(unittest.TestCase):
@@ -225,6 +230,54 @@ class RestesDeQt(unittest.TestCase):
                                side_effect=PermissionError("occupé")):
             self.assertEqual(self.nettoyer(), [])
         self.assertTrue(pyqt6.is_dir())
+
+
+class EnvironnementSysteme(unittest.TestCase):
+    """Programmes du système lancés depuis le binaire Linux (xdg-open, le
+    navigateur) : LD_LIBRARY_PATH d'origine, pas celui que préfixe
+    PyInstaller. Jumeau des tests de lidar2map."""
+
+    BUNDLE = "/opt/gpxsolar/_internal"
+
+    def retablir(self, environ, fige=True, plateforme="linux"):
+        _installation.retablir_environnement_systeme(
+            fige=fige, plateforme=plateforme, environ=environ)
+        return environ
+
+    def test_valeur_d_origine_rendue(self):
+        environ = self.retablir({"LD_LIBRARY_PATH": f"{self.BUNDLE}:/usr/local/lib",
+                                 "LD_LIBRARY_PATH_ORIG": "/usr/local/lib"})
+        self.assertEqual(environ["LD_LIBRARY_PATH"], "/usr/local/lib")
+
+    def test_variable_absente_avant_le_bootloader_retiree(self):
+        environ = self.retablir({"LD_LIBRARY_PATH": self.BUNDLE, "PATH": "/usr/bin"})
+        self.assertNotIn("LD_LIBRARY_PATH", environ)
+        self.assertEqual(environ["PATH"], "/usr/bin")
+
+    def test_sources_gardent_le_choix_de_l_utilisateur(self):
+        environ = self.retablir({"LD_LIBRARY_PATH": "/choix/utilisateur"}, fige=False)
+        self.assertEqual(environ["LD_LIBRARY_PATH"], "/choix/utilisateur")
+
+    def test_windows_et_macos_intacts(self):
+        for plateforme in ("win32", "darwin"):
+            with self.subTest(plateforme=plateforme):
+                environ = self.retablir({"LD_LIBRARY_PATH": self.BUNDLE,
+                                         "LD_LIBRARY_PATH_ORIG": "/usr/lib"},
+                                        plateforme=plateforme)
+                self.assertEqual(environ["LD_LIBRARY_PATH"], self.BUNDLE)
+
+    def test_par_defaut_le_processus_en_cours(self):
+        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": self.BUNDLE,
+                                          "LD_LIBRARY_PATH_ORIG": "/usr/lib"}, clear=True), \
+             mock.patch.object(sys, "frozen", True, create=True), \
+             mock.patch.object(sys, "platform", "linux"):
+            _installation.retablir_environnement_systeme()
+            self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/usr/lib")
+
+    def test_appelee_avant_tout_lancement_de_processus(self):
+        source = (RACINE / "gpxsolar.py").read_text(encoding="utf-8")
+        appel = source.index("_installation.retablir_environnement_systeme()")
+        self.assertLess(appel, source.index("subprocess.run("))
 
 
 if __name__ == "__main__":

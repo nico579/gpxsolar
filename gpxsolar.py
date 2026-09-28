@@ -60,6 +60,12 @@ for _std in ("stdout", "stderr"):
 # comme celles de lidar2map, blink2video et watch2notif (voir _installation.py).
 import _installation
 
+# Dès le démarrage, avant tout lancement de processus : les programmes du
+# système lancés depuis le binaire Linux (xdg-open, navigateur) doivent
+# recevoir le LD_LIBRARY_PATH d'origine, pas celui que PyInstaller préfixe
+# de ses bibliothèques. Comme lidar2map et blink2video.
+_installation.retablir_environnement_systeme()
+
 # --desinstaller, avant tout bootstrap : les sources ne doivent pas créer un
 # venv pour le supprimer aussitôt. Jusqu'à la 1.4, seul le lanceur le
 # traitait ; il vaut désormais aussi pour les sources.
