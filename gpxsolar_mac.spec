@@ -33,6 +33,11 @@ CONSOLE = False
 NAME    = "gpxsolar"
 
 SRC = Path(SPECPATH)
+# Icônes rangées comme celles de blink2video, watch2notif et lidar2map :
+# assets/gpxsolar.png pour le .app, converti en .icns par PyInstaller
+# (Pillow), et assets/gpxsolar.ico, embarqué plus bas, pour la zone de
+# notification et l'onglet.
+APP_ICON = SRC / "assets" / "gpxsolar.png"
 
 datas         = []
 binaries      = []
@@ -153,7 +158,7 @@ a = Analysis(
                    ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
                    ("gui/app.js", "gui"),     # livré tel quel
                    ("gui/web_bridge.js", "gui"),
-                   ("gui/gpxsolar_icon.png", "gui")],
+                   ("assets/gpxsolar.ico", "assets")],  # notification, onglet
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=[str(_hook)], excludes=_excludes_mac, noarchive=False, optimize=0,
 )
@@ -175,7 +180,7 @@ exe = EXE(
     # (arm64 sur runner Apple Silicon, x86_64 sur runner Intel). Pas de valeur
     # en dur, sinon le build Intel produirait un binaire arm64 inutilisable.
     argv_emulation=False, target_arch=None,
-    codesign_identity=None, entitlements_file=None, icon=None,
+    codesign_identity=None, entitlements_file=None, icon=str(APP_ICON),
 )
 
 coll = COLLECT(
@@ -188,7 +193,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="GPXSOLAR.app",
-    icon=None,
+    icon=str(APP_ICON),
     bundle_identifier="fr.nicolas.gpxsolar",
     info_plist={
         "NSHighResolutionCapable": "True",

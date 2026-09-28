@@ -47,6 +47,11 @@ HIDE_CONSOLE = "hide-early" if sys.platform == "win32" else None
 NAME    = "gpxsolar"
 
 SRC = Path(SPECPATH)
+# Icônes rangées comme celles de blink2video, watch2notif et lidar2map :
+# assets/gpxsolar.png pour l'exécutable (Windows ; sans effet sous Linux),
+# converti par PyInstaller à l'aide de Pillow, et assets/gpxsolar.ico,
+# embarqué plus bas, pour la zone de notification et l'onglet.
+APP_ICON = SRC / "assets" / "gpxsolar.png"
 
 
 # Ressource VERSIONINFO du binaire Windows (ignoree sans effet sous Linux).
@@ -231,7 +236,7 @@ a = Analysis(
                    ("gui/style.css", "gui"),  # bundlé dans _internal/gui/ ;
                    ("gui/app.js", "gui"),     # livré tel quel
                    ("gui/web_bridge.js", "gui"),
-                   ("gui/gpxsolar_icon.png", "gui")],
+                   ("assets/gpxsolar.ico", "assets")],  # notification, onglet
 
     hiddenimports=hiddenimports, hookspath=[], hooksconfig={},
     runtime_hooks=_runtime_hooks, excludes=_excludes, noarchive=False, optimize=0,
@@ -253,7 +258,7 @@ if ONEFILE:
         hide_console=HIDE_CONSOLE,
         disable_windowed_traceback=False, argv_emulation=False,
         target_arch=None, codesign_identity=None, entitlements_file=None,
-        icon=None,
+        icon=str(APP_ICON),
         version=_version_info(VERSION),
     )
 else:
@@ -264,7 +269,7 @@ else:
         console=CONSOLE, hide_console=HIDE_CONSOLE,
         disable_windowed_traceback=False,
         argv_emulation=False, target_arch=None,
-        codesign_identity=None, entitlements_file=None, icon=None,
+        codesign_identity=None, entitlements_file=None, icon=str(APP_ICON),
         version=_version_info(VERSION),
     )
     coll = COLLECT(

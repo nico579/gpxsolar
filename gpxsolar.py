@@ -103,7 +103,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.6.1"
+VERSION      = "1.6.2"
 VERSION_DATE = "2026-09"
 
 
@@ -5091,6 +5091,14 @@ def _resoudre_gui_dir() -> Path:
                        f"bundled?). Searched: {[str(b) for b in bases]}")
 
 
+def _fichier_icone(gui_dir: Path) -> Path:
+    """assets/gpxsolar.ico, voisin de gui/ (dans _internal/ une fois figé) :
+    icône de la zone de notification et de l'onglet. Rangée comme celles de
+    blink2video, watch2notif et lidar2map : assets/<app>.png pour
+    l'exécutable, assets/<app>.ico pour le reste."""
+    return gui_dir.parent / "assets" / "gpxsolar.ico"
+
+
 def _api_browse_dir(path: str = "", kind: str = "", exts=None, mode: str = "") -> dict:
     """Parcours des dossiers côté serveur, repris de lidar2map : remplace le
     sélecteur de fichier natif de pywebview (retiré). Un navigateur ne peut
@@ -5160,6 +5168,7 @@ def _premier_port_libre(port_depart: int, gui_dir: Path, api_routes: dict,
             server = _serve_web.demarrer(
                 bind=HOTE_GUI, port=port, trusted_host="",
                 gui_dir=gui_dir, api_routes=api_routes, post_routes=post_routes,
+                favicon=_fichier_icone(gui_dir),
             )
             return server, port
         except OSError:
@@ -5179,7 +5188,7 @@ def _construire_tray_icon(gui_dir: Path, on_open, on_restart, on_stop, lang="en"
     import pystray
     from PIL import Image
     ouvrir, redemarrer, arreter = TRAY_LIBELLES.get(lang, TRAY_LIBELLES["en"])
-    image = Image.open(gui_dir / "gpxsolar_icon.png")
+    image = Image.open(_fichier_icone(gui_dir))
     menu = pystray.Menu(
         pystray.MenuItem(ouvrir, on_open, default=True),
         pystray.MenuItem(redemarrer, on_restart),

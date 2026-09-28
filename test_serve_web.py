@@ -84,6 +84,7 @@ class ServeurTests(unittest.TestCase):
                              ("app.js", "// app"), ("style.css", "/* css */"),
                              ("web_bridge.js", "// pont")):
             (gui / nom).write_text(contenu, encoding="utf-8")
+        (gui / "icone.ico").write_bytes(b"\x00\x00\x01\x00icone")
         cls.recus = []
 
         def boom():
@@ -97,7 +98,8 @@ class ServeurTests(unittest.TestCase):
             bind="127.0.0.1", port=0, trusted_host="", gui_dir=gui,
             api_routes={"init": lambda: {"app": "gpxsolar"}, "boom": boom,
                         "browse-dir": parcourir},
-            post_routes={"echo": lambda payload: {"recu": payload}})
+            post_routes={"echo": lambda payload: {"recu": payload}},
+            favicon=gui / "icone.ico")
         cls.base = f"http://127.0.0.1:{cls.serveur.server_address[1]}"
 
     @classmethod
@@ -113,6 +115,13 @@ class ServeurTests(unittest.TestCase):
         for chemin, attendu in (("/app.js", b"// app"), ("/style.css", b"/* css */"),
                                 ("/web_bridge.js", b"// pont")):
             self.assertEqual(_requete(self.base + chemin), (200, attendu), chemin)
+
+    def test_icone_de_l_onglet(self):
+        # Comme blink2video : /favicon.ico, gardé une semaine par le navigateur.
+        with urllib.request.urlopen(self.base + "/favicon.ico", timeout=10) as reponse:
+            self.assertEqual(reponse.headers["Content-Type"], "image/x-icon")
+            self.assertEqual(reponse.headers["Cache-Control"], "public, max-age=604800")
+            self.assertEqual(reponse.read(), b"\x00\x00\x01\x00icone")
 
     def test_route_get_en_json(self):
         statut, corps = _requete(self.base + "/api/init")
@@ -297,6 +306,18 @@ class PontJsTests(unittest.TestCase):
         self.assertLess(self.page.index('src="/web_bridge.js"'),
                         self.page.index('src="/app.js"'))
         self.assertIn('href="/style.css"', self.page)
+
+    def test_icones_rangees_comme_les_autres_apps(self):
+        # Comme blink2video, watch2notif et lidar2map : assets/<app>.png de
+        # 1254 px pour l'exécutable, assets/<app>.ico aux neuf tailles de
+        # celui de blink2video pour la zone de notification et l'onglet.
+        self.assertIn('<link rel="icon" href="/favicon.ico">', self.page)
+        png = (ROOT / "assets" / "gpxsolar.png").read_bytes()
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(png[16:24], (1254).to_bytes(4, "big") * 2)
+        ico = (ROOT / "assets" / "gpxsolar.ico").read_bytes()
+        self.assertEqual(ico[:4], b"\x00\x00\x01\x00")
+        self.assertEqual(int.from_bytes(ico[4:6], "little"), 9)
 
     def test_chaque_appel_de_app_js_existe_dans_le_pont(self):
         definis = set(re.findall(r"^\s+(\w+):\s*\(", self.pont, re.M))

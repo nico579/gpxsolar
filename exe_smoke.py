@@ -268,7 +268,7 @@ def smoke(archive: Path, racine: Path) -> None:
         base = f"http://127.0.0.1:{port}"
         if b"Simu Rando Solaire" not in lire(base + "/"):
             raise Echec("la page servie n'est pas celle de gpxsolar")
-        for fichier in ("/app.js", "/style.css", "/web_bridge.js"):
+        for fichier in ("/app.js", "/style.css", "/web_bridge.js", "/favicon.ico"):
             if not lire(base + fichier):
                 raise Echec(f"{fichier} servi vide")
         if "items" not in json.loads(lire(base + "/api/poll-log")):
