@@ -1,7 +1,8 @@
 """Tests de _installation.py : le programme livré tel quel depuis la 1.5.0.
 
 Ce qu'un lanceur <= 1.4 laissait (son extraction, son bundle zippé) est
-retiré au démarrage, jamais le dossier d'où tourne le programme ; et
+retiré au démarrage, jamais le dossier d'où tourne le programme ; les
+fichiers de Qt que la 1.5.0 laisse dans _internal aussi, seulement eux ; et
 --desinstaller ne supprime jamais le programme lui-même. Fichiers réels dans
 un dossier temporaire, jamais les vrais dossiers de l'utilisateur.
 
@@ -123,6 +124,107 @@ class Desinstallation(_Racine):
             systeme="Windows", home=self.home, localappdata=str(local))
         self.assertEqual(cibles[0][0], local / "gpxsolar")
         self.assertEqual(cibles[1][0], self.home / ".gpxsolar" / "venv")
+
+
+class RestesDeQt(unittest.TestCase):
+    """La 1.6 décompressée par-dessus la 1.5.0 : seuls les noms des listes,
+    plus anciens que le reste de la version en place, quittent _internal."""
+
+    def setUp(self):
+        temporaire = tempfile.TemporaryDirectory(prefix="gpxsolar-restes-qt-")
+        self.addCleanup(temporaire.cleanup)
+        self.interne = Path(temporaire.name) / "_internal"
+        self.interne.mkdir()
+        repere = self.interne / _installation.REPERE_VERSION
+        repere.write_bytes(b"zip")
+        self.date_version = repere.stat().st_mtime
+        self.ancienne = self.date_version - 86400    # la 1.5.0, la veille
+
+    def poser(self, nom, date, dossier=True):
+        chemin = self.interne / nom
+        if dossier:
+            (chemin / "sous").mkdir(parents=True)
+            fichiers = [chemin / "a.bin", chemin / "sous" / "b.bin"]
+        else:
+            fichiers = [chemin]
+        for fichier in fichiers:
+            fichier.write_bytes(b"x")
+            os.utime(fichier, (date, date))
+        return chemin
+
+    def nettoyer(self, systeme="Windows"):
+        return _installation.nettoyer_restes_de_qt(systeme=systeme, interne=self.interne)
+
+    def test_restes_anciens_retires_version_en_place_gardee(self):
+        pyqt6 = self.poser("PyQt6", self.ancienne)
+        libpq = self.poser("LIBPQ.dll", self.ancienne, dossier=False)
+        numpy = self.poser("numpy", self.ancienne)       # hors liste, même ancien
+
+        self.assertEqual(set(self.nettoyer()), {pyqt6, libpq})
+
+        self.assertFalse(pyqt6.exists())
+        self.assertFalse(libpq.exists())
+        self.assertTrue((numpy / "a.bin").is_file())
+        self.assertTrue((self.interne / _installation.REPERE_VERSION).is_file())
+        self.assertEqual(self.nettoyer(), [])
+
+    def test_nom_de_la_liste_livre_de_nouveau_reste(self):
+        # Une version future qui embarquerait de nouveau qtpy : ses fichiers
+        # portent la date du reste de la version.
+        qtpy = self.poser("qtpy", self.date_version)
+        self.assertEqual(self.nettoyer(), [])
+        self.assertTrue(qtpy.is_dir())
+
+    def test_un_seul_fichier_recent_garde_l_entree(self):
+        webview = self.poser("webview", self.ancienne)
+        os.utime(webview / "sous" / "b.bin", (self.date_version, self.date_version))
+        self.assertEqual(self.nettoyer(), [])
+        self.assertTrue((webview / "a.bin").is_file())
+
+    def test_moins_d_une_heure_d_ecart_reste(self):
+        # Décompression qui ne rend pas les dates de l'archive : les fichiers
+        # de la version en place s'échelonnent sur quelques minutes.
+        pyqt6 = self.poser("PyQt6", self.date_version - 600)
+        self.assertEqual(self.nettoyer(), [])
+        self.assertTrue(pyqt6.is_dir())
+
+    def test_une_liste_par_systeme_rien_sous_macos(self):
+        libqt = self.poser("libQt6Core.so.6", self.ancienne, dossier=False)
+        libpq = self.poser("LIBPQ.dll", self.ancienne, dossier=False)
+        self.assertEqual(self.nettoyer("Darwin"), [])
+        self.assertEqual(self.nettoyer("Windows"), [libpq])
+        self.assertEqual(self.nettoyer("Linux"), [libqt])
+
+    def test_lien_symbolique_retire_sans_toucher_sa_cible(self):
+        # Sous Linux, PyInstaller relie des bibliothèques de premier niveau
+        # à leur copie rangée dans un sous-dossier.
+        if os.utime not in os.supports_follow_symlinks:
+            self.skipTest("date d'un lien non modifiable ici")
+        cible = self.poser("numpy", self.ancienne)
+        lien = self.interne / "libQt6Core.so.6"
+        try:
+            lien.symlink_to(cible / "a.bin")
+        except OSError:
+            self.skipTest("liens symboliques indisponibles ici")
+        os.utime(lien, (self.ancienne, self.ancienne), follow_symlinks=False)
+
+        self.assertEqual(self.nettoyer("Linux"), [lien])
+
+        self.assertFalse(os.path.lexists(lien))
+        self.assertTrue((cible / "a.bin").is_file())
+
+    def test_sans_repere_rien_ne_part(self):
+        pyqt6 = self.poser("PyQt6", self.ancienne)
+        (self.interne / _installation.REPERE_VERSION).unlink()
+        self.assertEqual(self.nettoyer(), [])
+        self.assertTrue(pyqt6.is_dir())
+
+    def test_entree_occupee_attend_le_lancement_suivant(self):
+        pyqt6 = self.poser("PyQt6", self.ancienne)
+        with mock.patch.object(_installation.shutil, "rmtree",
+                               side_effect=PermissionError("occupé")):
+            self.assertEqual(self.nettoyer(), [])
+        self.assertTrue(pyqt6.is_dir())
 
 
 if __name__ == "__main__":

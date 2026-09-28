@@ -116,7 +116,8 @@ jobs:
 
       - name: Installation et ménage de l'ancien lanceur (test_installation.py)
         # Depuis la 1.5, le programme est livré tel quel : ce qu'un lanceur
-        # <= 1.4 laissait est retiré au démarrage, jamais le dossier d'où
+        # <= 1.4 laissait est retiré au démarrage, comme les fichiers de Qt
+        # que la 1.5.0 laisse dans _internal, jamais le dossier d'où
         # tourne le programme, et --desinstaller ne supprime jamais celui-ci.
         run: python test_installation.py
 

@@ -1,5 +1,6 @@
 """Installation de gpxsolar depuis la 1.5.0 : le programme livré tel quel,
-ce qu'un lanceur <= 1.4 laissait derrière lui, et la désinstallation.
+ce qu'un lanceur <= 1.4 laissait derrière lui, ce que la 1.5.0 laisse dans
+_internal sous la 1.6, et la désinstallation.
 
 Jusqu'à la 1.4, un petit lanceur contenait le programme zippé
 (gpxsolar_bundle.zip), l'extrayait dans le dossier de données de l'OS
@@ -8,7 +9,9 @@ Depuis la 1.5, l'archive livre directement le programme (dossier onedir, ou
 GPXSOLAR.app sous macOS), comme celles de lidar2map, blink2video et
 watch2notif. Jumeau des fonctions de lidar2map (_runtime_paths.
 dossier_programme, _bootstrap_runtime.chemins_desinstallation,
-desinstaller_lidar2map et nettoyer_ancienne_extraction).
+desinstaller_lidar2map et nettoyer_ancienne_extraction) ; le ménage des
+restes de Qt est propre à gpxsolar, seul des quatre à avoir livré Qt tel
+quel.
 
 Bibliothèque standard seule : la désinstallation passe avant le bootstrap
 des dépendances.
@@ -20,8 +23,14 @@ import os
 import shutil
 from pathlib import Path
 
+import _restes_qt
+
 NOM_BUNDLE = "gpxsolar_bundle.zip"
 MARQUE_EXTRACTION = ".bundle_sha"
+# Écrit par PyInstaller dans _internal à chaque build, avec tout le reste :
+# sa date est celle de la version en place (voir nettoyer_restes_de_qt).
+REPERE_VERSION = "base_library.zip"
+MARGE_RESTES_S = 3600
 
 
 def dossier_programme(executable) -> Path:
@@ -148,4 +157,62 @@ def nettoyer_ancienne_extraction(*, systeme, home, localappdata=None, executable
         return retires
     shutil.rmtree(corbeille, ignore_errors=True)
     retires.append(dossier)
+    return retires
+
+
+def _plus_recente_modification(chemin: Path) -> float:
+    """Date de modification la plus récente d'un fichier, d'un lien, ou des
+    fichiers et liens d'un dossier ; celle des dossiers eux-mêmes ne compte
+    pas, car elle suit le jour de la décompression plutôt que l'archive."""
+    if not chemin.is_dir() or chemin.is_symlink():
+        return chemin.lstat().st_mtime
+    plus_recente = 0.0
+    for racine, _, fichiers in os.walk(chemin, followlinks=False):
+        for nom in fichiers:
+            try:
+                plus_recente = max(plus_recente, (Path(racine) / nom).lstat().st_mtime)
+            except OSError:
+                pass
+    return plus_recente
+
+
+def nettoyer_restes_de_qt(*, systeme, interne, marge_s=MARGE_RESTES_S):
+    """Retire de _internal ce que la 1.5.0 y a laissé quand la 1.6 a été
+    décompressée par-dessus, et rend la liste de ce qui a été retiré.
+
+    Deux conditions, pour ne jamais toucher à ce que livre la version en
+    place. Le nom doit figurer dans les listes de _restes_qt : rien d'autre
+    ne peut partir. Et tous ses fichiers doivent dater d'au moins marge_s
+    avant REPERE_VERSION : la décompression donne à chaque fichier la date
+    de son archive (Explorateur, 7-Zip, tar) ou celle du jour, si bien
+    qu'un nom qu'une version future livrerait de nouveau porte la date du
+    reste et demeure. La date de création ne vaut rien ici, 7-Zip garde
+    celle du fichier qu'il écrase ; et le repère est dans _internal plutôt
+    que l'exécutable, qu'une signature pourrait dater après le reste.
+
+    Une entrée occupée ou protégée reste en place pour le lancement
+    suivant."""
+    noms = _restes_qt.PAR_SYSTEME.get(systeme)
+    if not noms:
+        return []
+    interne = Path(interne)
+    try:
+        limite = (interne / REPERE_VERSION).stat().st_mtime - marge_s
+    except OSError:
+        return []
+    retires = []
+    for nom in sorted(noms):
+        chemin = interne / nom
+        if not os.path.lexists(chemin):
+            continue
+        try:
+            if _plus_recente_modification(chemin) >= limite:
+                continue
+            if chemin.is_dir() and not chemin.is_symlink():
+                shutil.rmtree(chemin)
+            else:
+                chemin.unlink()
+        except OSError:
+            continue
+        retires.append(chemin)
     return retires

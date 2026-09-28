@@ -180,6 +180,11 @@ Version 1.5 deletes that copy the first time it starts, along with the
 `gpxsolar_bundle.zip` that the old launcher leaves next to the program when
 you extract the new archive over the old one.
 
+In the same way, version 1.6.1 removes, the first time it starts, the files
+of the old Qt window that version 1.5 leaves in `_internal` when 1.6 is
+extracted over it: close to 600 MB under Windows and Linux. Only those
+files go, and only when they are older than the rest of the program.
+
 Clean uninstall: `gpxsolar(.exe) --desinstaller` removes the source
 installation's venv and, if one is left, the old launcher's extracted copy;
 never the program itself, your settings or your outputs.

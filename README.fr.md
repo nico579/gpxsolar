@@ -182,6 +182,12 @@ La version 1.5 supprime cette copie à son premier démarrage, ainsi que le
 `gpxsolar_bundle.zip` que l'ancien lanceur laisse à côté du programme quand on
 décompresse la nouvelle archive par-dessus l'ancienne.
 
+De même, la version 1.6.1 retire à son premier démarrage les fichiers de
+l'ancienne fenêtre Qt que la version 1.5 laisse dans `_internal` quand on
+décompresse la 1.6 par-dessus : près de 600 Mo sous Windows et Linux. Ces
+fichiers-là seulement, et seulement s'ils sont plus anciens que le reste du
+programme.
+
 Désinstallation propre : `gpxsolar(.exe) --desinstaller` supprime le venv de
 l'installation depuis les sources et, s'il en reste, la copie extraite par
 l'ancien lanceur ; jamais le programme lui-même, vos réglages ni vos sorties.

@@ -11,6 +11,9 @@ tests/exe_smoke.py de lidar2map :
   2. ménage de ce qu'un lanceur <= 1.4 laissait : son extraction, marquée
      .bundle_sha, et le gpxsolar_bundle.zip voisin du programme, posés avant
      le démarrage, ont disparu (_installation.nettoyer_ancienne_extraction) ;
+     de même pour deux entrées de Qt posées dans _internal avec la date de
+     la veille, comme la 1.5.0 les laisse, tandis qu'une troisième, datée
+     du jour, reste (_installation.nettoyer_restes_de_qt) ;
   3. l'interface : « --serve-gui --no-browser --no-tray » démarre le serveur
      web, /api/init répond "app": "gpxsolar" avec la version du code, la
      page, ses fichiers et le journal sont servis. Depuis la 1.6.0, qui a
@@ -132,6 +135,28 @@ def poser_restes_du_lanceur(home: Path, programme: Path) -> list[Path]:
     return restes
 
 
+def poser_restes_de_qt(programme: Path) -> tuple[list[Path], list[Path]]:
+    """Ce que la 1.5.0 laisse dans _internal sous la 1.6 : deux entrées de
+    la veille, à retirer, et une troisième datée du jour, comme si une
+    version future la livrait de nouveau, à garder. Rien sous macOS, où
+    l'application se remplace d'un bloc."""
+    if programme.parent.name == "MacOS":
+        return [], []
+    interne = programme.parent / "_internal"
+    veille = (interne / "base_library.zip").stat().st_mtime - 86400
+    anciennes = []
+    for nom in ("PyQt6", "qtpy"):
+        fichier = interne / nom / "__init__.py"
+        fichier.parent.mkdir()
+        fichier.write_text("", encoding="utf-8")
+        os.utime(fichier, (veille, veille))
+        anciennes.append(fichier.parent)
+    recente = interne / "webview" / "__init__.py"
+    recente.parent.mkdir()
+    recente.write_text("", encoding="utf-8")
+    return anciennes, [recente.parent]
+
+
 # ── Serveur de l'interface (repris de tests/exe_smoke.py de lidar2map) ─────
 
 def port_libre() -> int:
@@ -199,6 +224,7 @@ def smoke(archive: Path, racine: Path) -> None:
     avant = {p.name for p in programme.parent.iterdir()}
     env, home = environnement(racine)
     restes = poser_restes_du_lanceur(home, programme)
+    restes_qt, gardes_qt = poser_restes_de_qt(programme)
     print(f"   programme : {programme}", flush=True)
 
     print("\n== 1. démarrage (--version)", flush=True)
@@ -217,12 +243,18 @@ def smoke(archive: Path, racine: Path) -> None:
                     f"« gpxsolar {attendue} »\n{sortie[-3000:]}")
     print(f"   OK : gpxsolar {attendue}", flush=True)
 
-    print("\n== 2. ménage de ce que laissait un lanceur <= 1.4", flush=True)
-    encore = [str(chemin) for chemin in restes if chemin.exists()]
+    print("\n== 2. ménage de ce que laissaient un lanceur <= 1.4 et la 1.5.0", flush=True)
+    encore = [str(chemin) for chemin in restes + restes_qt if chemin.exists()]
     if encore:
-        raise Echec(f"restes du lanceur toujours présents : {', '.join(encore)}"
+        raise Echec(f"restes toujours présents : {', '.join(encore)}"
                     f"\n{sortie[-3000:]}")
-    print(f"   OK : {len(restes)} reste(s) retiré(s) au démarrage", flush=True)
+    retires_a_tort = [str(chemin) for chemin in gardes_qt if not chemin.exists()]
+    if retires_a_tort:
+        raise Echec(f"retiré alors que daté du jour : {', '.join(retires_a_tort)}"
+                    f"\n{sortie[-3000:]}")
+    print(f"   OK : {len(restes) + len(restes_qt)} reste(s) retiré(s) au démarrage"
+          + (f", {len(gardes_qt)} entrée du jour gardée" if gardes_qt else ""),
+          flush=True)
 
     print("\n== 3. interface (--serve-gui)", flush=True)
     port = port_libre()

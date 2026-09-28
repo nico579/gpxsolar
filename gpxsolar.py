@@ -73,7 +73,9 @@ if "--desinstaller" in sys.argv:
 # Ce qu'un ancien lanceur a laissé sur disque est retiré au lancement du
 # programme figé, jamais dans le sous-processus d'analyse de l'interface
 # (GPXSOLAR_CHILD) ni à un simple import. Jamais bloquant : un échec laisse
-# les restes en place pour le lancement suivant.
+# les restes en place pour le lancement suivant. De même pour les fichiers
+# de la fenêtre Qt que la 1.5.0 laisse dans _internal quand la 1.6 est
+# décompressée par-dessus (près de 600 Mo, retirés en une seconde environ).
 if (getattr(sys, "frozen", False) and __name__ == "__main__"
         and os.environ.get("GPXSOLAR_CHILD") != "1"):
     try:
@@ -84,13 +86,18 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
             print(f"  Removed what the former launcher left: {_reste}")
     except OSError as _exc:
         print(f"  Cleanup of the former launcher's files postponed ({_exc}).")
+    _retires_qt = _installation.nettoyer_restes_de_qt(
+        systeme=platform.system(), interne=sys._MEIPASS)
+    if _retires_qt:
+        print(f"  Removed {len(_retires_qt)} entries of the Qt window left by"
+              f" gpxsolar 1.5 in {sys._MEIPASS}")
 
 
 # Version applicative — SOURCE UNIQUE : utilisée par --version, par le titre
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.6.0"
+VERSION      = "1.6.1"
 VERSION_DATE = "2026-09"
 
 
