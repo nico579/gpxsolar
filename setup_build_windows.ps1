@@ -1,8 +1,9 @@
 # setup_build_windows.ps1 — Prepare un PC Windows pour builder gpxsolar.exe
 #
 # 1. Installe Python 3.12 si absent (via winget ou python.org)
-# 2. Lance gpxsolar.py --installer-deps -> cree ~/.gpxsolar/venv + toutes les deps
-# 3. Installe PyInstaller dans ce venv
+# 2. Lance gpxsolar.py --installer-deps -> cree ~/.gpxsolar/venv + le verrou
+#    requirements.txt (versions exactes, empreintes verifiees)
+# 3. Installe PyInstaller dans ce venv (requirements-build.txt)
 #
 # (Contrairement a lidar2map, gpxsolar n'a PAS besoin de JRE ni d'osmosis.)
 #
@@ -58,8 +59,11 @@ if (-not (Test-Path "$VENV\Scripts\pip.exe")) {
 ok "Dependances installees dans $VENV"
 
 # -- 3. PyInstaller ------------------------------------------------------------
+# Version figee, empreintes verifiees, comme toutes les dependances : le
+# verrou de construction reprend celui de gpxsolar, plus PyInstaller.
 step "3/3" "PyInstaller"
-& "$VENV\Scripts\pip.exe" install --quiet pyinstaller
+& "$VENV\Scripts\python.exe" -m pip install --quiet --require-hashes -r "$ScriptDir\requirements-build.txt"
+if ($LASTEXITCODE -ne 0) { Write-Host "  ERREUR : installation de requirements-build.txt" -ForegroundColor Red; exit 1 }
 $pyiVer = & "$VENV\Scripts\pyinstaller.exe" --version
 ok "PyInstaller $pyiVer"
 

@@ -1,0 +1,41 @@
+# Dépendances directes de gpxsolar, déclarées ici et nulle part ailleurs.
+# Tout le reste s'en déduit : le mode sources (bootstrap), la construction
+# du programme (requirements-build.in) et la CI installent le verrou
+# requirements.txt, qui fixe la version exacte et les empreintes SHA-256 de
+# chaque paquet, dépendances indirectes comprises, pour Windows, macOS et
+# Linux à la fois. Après toute modification ici, régénérer les deux verrous
+# (voir BUILD.md, « Dépendances ») :
+#
+#   uv pip compile requirements.in --universal --python-version 3.9 --generate-hashes -o requirements.txt
+#   uv pip compile requirements-build.in --universal --python-version 3.9 --generate-hashes -o requirements-build.txt
+
+# Calcul solaire, relief, géographie
+pytz
+srtm.py
+pysolar
+gpxpy
+pandas
+requests
+numpy
+timezonefinder
+simplekml
+shapely
+Pillow
+pyproj
+rasterio
+
+# Icône de zone de notification de l'interface web (depuis la 1.6.0), et
+# briques communes aux quatre applications (menu de l'icône, relance,
+# raccourci, recherche de version). Fourchette : une version incompatible de
+# la bibliothèque ne peut pas entrer dans le verrou.
+pystray
+nico579-commons>=0.3.1,<0.4
+
+# Accélération du calcul (x3 à x10 pour le lancer de rayons). numba ne
+# publie plus de roue pour les Mac Intel depuis la 0.61 : gpxsolar s'en passe
+# sur ce seul système, en NumPy pur, comme avant le verrou (son installation y
+# échouait déjà, « reduced functionality »).
+numba ; sys_platform != 'darwin' or platform_machine != 'x86_64'
+
+# Extraction des archives .7z de l'IGN (BD ALTI, RGE ALTI)
+py7zr

@@ -14,13 +14,22 @@ desinstaller_lidar2map, nettoyer_ancienne_extraction et
 retablir_environnement_systeme) ; le ménage des restes de Qt est propre à
 gpxsolar, seul des quatre à avoir livré Qt tel quel.
 
-Bibliothèque standard seule : la désinstallation passe avant le bootstrap
-des dépendances.
+Dépendances : déclarées une seule fois, dans requirements.in, et installées
+depuis le verrou requirements.txt (versions exactes, empreintes SHA-256,
+valable pour Windows, macOS et Linux). Les aides qui le lisent, plus bas,
+sont les jumelles de celles de lidar2map (_bootstrap_runtime) : elles ne
+peuvent pas vivre dans nico579-commons, puisque le bootstrap tourne avant
+que la bibliothèque soit installée.
+
+Bibliothèque standard seule : la désinstallation et le bootstrap des
+dépendances passent avant l'installation de tout paquet.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -33,6 +42,14 @@ MARQUE_EXTRACTION = ".bundle_sha"
 # sa date est celle de la version en place (voir nettoyer_restes_de_qt).
 REPERE_VERSION = "base_library.zip"
 MARGE_RESTES_S = 3600
+
+RACINE = Path(__file__).resolve().parent
+# Dépendances directes (noms seuls), et leur verrou, à côté de gpxsolar.py.
+DEPENDANCES = RACINE / "requirements.in"
+VERROU = RACINE / "requirements.txt"
+# Dans le venv du mode sources : empreinte du verrou qu'on y a installé. Un
+# verrou changé (nouvelle version de gpxsolar) le fait réinstaller.
+MARQUE_VERROU = "gpxsolar-verrou.sha256"
 
 
 def dossier_programme(executable) -> Path:
@@ -249,3 +266,51 @@ def retablir_environnement_systeme(*, fige=None, plateforme=None, environ=None):
     else:
         # Variable absente avant le bootloader : il n'a rien gardé à rétablir.
         environ.pop("LD_LIBRARY_PATH", None)
+
+
+def nom_normalise(nom: str) -> str:
+    """Nom de distribution comparable (PEP 503) : « Pillow », « pillow » et
+    « srtm.py » / « srtm-py » se valent."""
+    return re.sub(r"[-_.]+", "-", nom).lower()
+
+
+def dependances_directes(fichier: Path = DEPENDANCES, *, conditionnelles=False) -> list:
+    """Noms des paquets de requirements.in, sans version.
+
+    Un paquet qui porte un marqueur d'environnement (« ; sys_platform ... »)
+    est conditionnel : absent à bon droit sur certains systèmes (numba sur
+    les Mac Intel, faute de roue), il n'est rendu que sur demande. Le
+    contrôle au démarrage ne l'exige donc pas, comme les dépendances dites
+    optionnelles d'avant le verrou."""
+    noms = []
+    for ligne in fichier.read_text(encoding="utf-8").splitlines():
+        ligne = ligne.split("#", 1)[0].strip()
+        if not ligne or ligne.startswith("-"):
+            continue
+        if ";" in ligne and not conditionnelles:
+            continue
+        noms.append(re.split(r"[\s<>=!~;\[]", ligne, maxsplit=1)[0])
+    return noms
+
+
+def dependances_absentes(noms, distributions=None) -> list:
+    """Ceux de ``noms`` qu'aucune distribution installée ne fournit.
+
+    Lit les métadonnées des paquets installés, sans rien importer : pas de
+    table paquet-module à tenir (Pillow s'importe PIL, srtm.py srtm), et
+    aucun module lourd chargé au démarrage."""
+    if distributions is None:
+        import importlib.metadata
+        distributions = importlib.metadata.distributions()
+    installes = {nom_normalise(d.metadata["Name"] or "") for d in distributions}
+    return [nom for nom in noms if nom_normalise(nom) not in installes]
+
+
+def empreinte_verrou(verrou: Path = VERROU) -> str:
+    return hashlib.sha256(verrou.read_bytes()).hexdigest()
+
+
+def commande_installation(python, *options, verrou: Path = VERROU) -> list:
+    """pip install du verrou, empreintes vérifiées."""
+    return [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check",
+            "--require-hashes", "-r", str(verrou), *options]

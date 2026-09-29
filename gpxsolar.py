@@ -17,10 +17,16 @@ Usage :
     python gpxsolar.py --serve-gui --help   # options de l'interface
     python gpxsolar.py --help         # options CLI
 
-Bootstrap des dépendances (style lidar2map) :
-    --bootstrap=auto   (défaut) : venv automatique dans ~/.gpxsolar
-    --bootstrap=pip            : install dans l'env Python courant
-    --bootstrap=none           : pas d'install, vérifie seulement
+Bootstrap des dépendances (style lidar2map), depuis le verrou requirements.txt
+(versions exactes, empreintes SHA-256) :
+    --bootstrap=auto   (défaut) : venv automatique dans ~/.gpxsolar, remis au
+                                  verrou quand une nouvelle version en apporte
+                                  un autre
+    --bootstrap=pip            : install du verrou dans l'env Python courant,
+                                  quitte à changer la version de paquets déjà
+                                  installés dans cet env
+    --bootstrap=none           : pas d'install, vérifie que les dépendances de
+                                  requirements.in sont installées
     --help-bootstrap           : affiche l'aide du bootstrap
 """
 
@@ -107,40 +113,13 @@ VERSION      = "1.7.0"
 VERSION_DATE = "2026-09"
 
 
-_DEPS_CRITIQUES = [
-    # (module à importer, paquet pip)
-    ("pytz",            "pytz"),
-    ("srtm",            "srtm.py"),
-    ("pysolar",         "pysolar"),
-    ("gpxpy",           "gpxpy"),
-    ("pandas",          "pandas"),
-    ("requests",        "requests"),
-    ("numpy",           "numpy"),
-    ("timezonefinder",  "timezonefinder"),
-    # Icône de zone de notification de l'interface web (depuis la 1.6.0,
-    # qui remplace pywebview + Qt) : critique comme chez lidar2map, pour que
-    # le build l'embarque toujours. Sans elle, le serveur tourne quand même
-    # (arrêt par Ctrl+C).
-    ("pystray",         "pystray"),
-    # Briques communes aux quatre applications (menu de l'icône, relance,
-    # raccourci, recherche de version), en fourchette : une version
-    # incompatible de la bibliothèque ne peut pas entrer dans un build.
-    ("nico579_commons", "nico579-commons>=0.3,<0.4"),
-    ("simplekml",       "simplekml"),
-    ("shapely",         "shapely"),
-    ("PIL",             "Pillow"),
-    ("pyproj",          "pyproj"),
-    ("rasterio",        "rasterio"),
-]
-_DEPS_OPTIONNELLES = [
-    # numba : accélération ×3-10 du ray-tracing et de l'interpolation
-    # temporelle. Si l'install échoue (Python trop récent par ex.), on
-    # garde le fallback NumPy pur.
-    ("numba",           "numba"),
-    # py7zr : extraction des archives IGN (.7z). Sans, BDALTI/RGEALTI
-    # restent téléchargeables mais l'extraction échouera.
-    ("py7zr",           "py7zr"),
-]
+# Dépendances : déclarées une seule fois, dans requirements.in, et installées
+# depuis le verrou requirements.txt (versions exactes, empreintes SHA-256,
+# Windows, macOS et Linux), par le mode sources comme par la construction du
+# programme et la CI. Les aides qui les lisent sont dans _installation.py.
+# Jusqu'à la 1.7, deux listes codées en dur ici, deux autres dans la CI, et
+# rien de figé : deux constructions du même commit n'embarquaient pas les
+# mêmes bibliothèques.
 
 
 def _resoudre_mode_bootstrap():
@@ -188,67 +167,47 @@ def _resoudre_mode_bootstrap():
     return mode
 
 
-def _imports_manquants(deps):
-    def _absent(mod):
-        try:
-            return importlib.util.find_spec(mod) is None
-        except (ImportError, ValueError):
-            # ValueError : module parent absent (paquet.X quand le paquet manque)
-            return True
-    return [pkg for mod, pkg in deps if _absent(mod)]
-
-
-def _pour_le_terminal(paquets):
-    """Paquets pip à coller dans un terminal : une fourchette de versions
-    entre guillemets doubles (compris par cmd, PowerShell et sh), sans quoi
-    < et > deviendraient des redirections."""
-    return " ".join(f'"{p}"' if any(c in p for c in "<>|&") else p
-                    for p in paquets)
-
-
 def _afficher_erreur_deps(manquantes, hint=""):
     print()
     print("  ╔══════════════════════════════════════════════════════════════╗")
-    print("  ║  ERROR: missing critical Python modules".ljust(63) + " ║")
+    print("  ║  ERROR: missing critical Python packages".ljust(63) + " ║")
     print("  ╚══════════════════════════════════════════════════════════════╝")
     print(f"  Missing: {', '.join(manquantes)}")
     if hint:
         print(f"  {hint}")
     print()
     print("  Solutions:")
-    print(f"    pip install {_pour_le_terminal(manquantes)}")
-    print("    # or create a venv:")
-    print("    python -m venv ~/.gpxsolar/venv")
-    if platform.system() == "Windows":
-        print("    %USERPROFILE%\\.gpxsolar\\venv\\Scripts\\pip install "
-              + _pour_le_terminal(manquantes))
-    else:
-        print(f"    ~/.gpxsolar/venv/bin/pip install {_pour_le_terminal(manquantes)}")
+    print("    1. Let gpxsolar create its own isolated environment (recommended):")
+    print("       python gpxsolar.py --bootstrap=auto")
+    print("    2. Install the lock into a venv of your own, then relaunch with")
+    print("       --bootstrap=none:")
+    print(f"       pip install -r {_installation.VERROU}")
     print()
 
 
-def _pip_install(python_exe, packages, label):
-    """Tente un pip install dans l'env donné. Retourne (ok, stderr_tail)."""
-    cmd = [str(python_exe), "-m", "pip", "install", "-q",
-           "--disable-pip-version-check"] + list(packages)
+def _installer_verrou(python_exe, *options):
+    """pip install du verrou requirements.txt (empreintes vérifiées) avec
+    ``python_exe``. Retourne (ok, fin du message d'erreur de pip)."""
+    commande = _installation.commande_installation(python_exe, *options)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        r = subprocess.run(commande, capture_output=True, text=True, timeout=1800)
     except (OSError, subprocess.TimeoutExpired) as e:
-        return False, f"{label}: {e}"
+        return False, str(e)
     if r.returncode == 0:
         return True, ""
     stderr = (r.stderr or r.stdout or "").strip()
-    if stderr:
-        stderr = "\n  ".join(stderr.split("\n")[-3:])
-    return False, stderr
+    return False, "\n  ".join(stderr.split("\n")[-3:])
 
 
 def _bootstrap_venv_auto(force: bool = False):
-    """Crée (si nécessaire) un venv ~/.gpxsolar/venv et y relance le script.
+    """Crée (si nécessaire) un venv ~/.gpxsolar/venv, y installe le verrou
+    requirements.txt et y relance le script. Un venv installé depuis un autre
+    verrou (nouvelle version de gpxsolar) est remis aux nouvelles versions,
+    sans être recréé.
 
     Args:
-        force : si True, crée TOUJOURS le venv même si les déps sont déjà
-                importables dans le Python courant. Sinon (mode 'auto'),
+        force : si True, crée TOUJOURS le venv même si les dépendances sont
+                déjà installées dans le Python courant. Sinon (mode 'auto'),
                 on saute la création quand tout est déjà en place.
     """
     is_windows = platform.system() == "Windows"
@@ -263,26 +222,28 @@ def _bootstrap_venv_auto(force: bool = False):
     except OSError:
         pass
 
-    manquantes = _imports_manquants(_DEPS_CRITIQUES)
+    manquantes = _installation.dependances_absentes(_installation.dependances_directes())
     if not manquantes and not force:
-        # Toutes les déps déjà importables : pas besoin de venv. Mais on l'annonce
+        # Toutes les déps déjà installées : pas besoin de venv. Mais on l'annonce
         # pour que l'utilisateur ne s'attende pas à voir un venv apparaître.
         print(f"  [bootstrap] dependencies already available in {sys.executable}")
         print("             venv not created - use --bootstrap=force to force creation")
         return
 
-    venv_bin = venv_path / ("Scripts" if is_windows else "bin")
-    venv_py  = venv_bin / ("python.exe" if is_windows else "python")
-    venv_pip = venv_bin / ("pip.exe"    if is_windows else "pip")
+    venv_bin  = venv_path / ("Scripts" if is_windows else "bin")
+    venv_py   = venv_bin / ("python.exe" if is_windows else "python")
+    marque    = venv_path / _installation.MARQUE_VERROU
+    empreinte = _installation.empreinte_verrou()
 
-    # Venv existant + déjà équipé : relancer dedans
-    if venv_py.exists():
-        check = subprocess.run(
-            [str(venv_py), "-c", "import " + ",".join(m for m, _ in _DEPS_CRITIQUES)],
-            capture_output=True)
-        if check.returncode == 0:
-            print(f"  Relaunching in venv: {venv_path}")
-            _relancer(venv_py, is_windows)
+    # Venv installé depuis ce même verrou : relancer dedans
+    try:
+        a_jour = venv_py.exists() and marque.read_text().strip() == empreinte
+    except OSError:
+        a_jour = False
+    if a_jour:
+        print(f"  Relaunching in venv: {venv_path}")
+        _relancer(venv_py, is_windows)
+        return  # _relancer ne revient pas (exec sur Unix, exit sous Windows)
 
     if not venv_py.exists():
         suppr = ("rmdir /s /q %USERPROFILE%\\.gpxsolar" if is_windows
@@ -304,22 +265,16 @@ def _bootstrap_venv_auto(force: bool = False):
             print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
             sys.exit(1)
 
-    # Installation groupée des déps critiques + optionnelles
-    pip_args_crit = [pkg for _, pkg in _DEPS_CRITIQUES]
-    pip_args_opt  = [pkg for _, pkg in _DEPS_OPTIONNELLES]
+    # Toutes les dépendances d'un coup, aux versions exactes du verrou, dont
+    # pip vérifie les empreintes.
     print("  Installing dependencies in the venv (3-5 min)...")
-    ok, err = _pip_install(venv_py, pip_args_crit + pip_args_opt, "venv-groupé")
+    ok, err = _installer_verrou(venv_py)
     if not ok:
-        print(f"  Bulk install failed, retrying without optional deps ({', '.join(pip_args_opt)})...")
-        ok, err = _pip_install(venv_py, pip_args_crit, "venv-critique")
-        if ok:
-            for opt in pip_args_opt:
-                ok_one, _ = _pip_install(venv_py, [opt], f"venv-{opt}")
-                print(f"    {'✓' if ok_one else '⚠'} {opt} : {'OK' if ok_one else 'failed - reduced functionality'}")
-        else:
-            print(f"  ERROR installing critical deps:\n  {err}")
-            print(f"  Retry manuel : {venv_pip} install {' '.join(pip_args_crit)}")
-            sys.exit(1)
+        print(f"  ERROR installing the dependencies in the venv:\n  {err}")
+        print("  Check your internet connection, then try:")
+        print("    " + subprocess.list2cmdline(_installation.commande_installation(venv_py)))
+        sys.exit(1)
+    marque.write_text(empreinte + "\n")
     print("  ✓ Dependencies installed.")
     print("  Relaunching in venv...")
     _relancer(venv_py, is_windows)
@@ -341,73 +296,44 @@ def _relancer(venv_python, is_windows):
 
 
 def _bootstrap_pip_courant():
-    """Mode --bootstrap=pip : install dans le Python courant (sans venv).
-    Stratégie 3 niveaux : standard → --break-system-packages → --user.
+    """Mode --bootstrap=pip : installe le verrou requirements.txt dans le
+    Python courant (sans venv), quitte à changer la version de paquets déjà
+    installés. Stratégie 3 niveaux : standard → --break-system-packages →
+    --user (dans un venv, seule la première a un sens).
     """
-    manquantes = _imports_manquants(_DEPS_CRITIQUES + _DEPS_OPTIONNELLES)
+    manquantes = _installation.dependances_absentes(_installation.dependances_directes())
     if not manquantes:
         return
 
-    crit_pkgs = [pkg for mod, pkg in _DEPS_CRITIQUES
-                 if importlib.util.find_spec(mod) is None]
-    opt_pkgs  = [pkg for mod, pkg in _DEPS_OPTIONNELLES
-                 if importlib.util.find_spec(mod) is None]
-    all_pkgs = crit_pkgs + opt_pkgs
-
     in_venv = (hasattr(sys, "real_prefix") or
                (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix))
-
-    base_cmd = [sys.executable, "-m", "pip", "install", "-q",
-                "--disable-pip-version-check"]
     if in_venv:
-        strategies = [(base_cmd + all_pkgs, "standard (venv)")]
+        strategies = [((), "standard (venv)")]
     else:
         strategies = [
-            (base_cmd + all_pkgs,                              "standard"),
-            (base_cmd + all_pkgs + ["--break-system-packages"], "--break-system-packages (PEP 668)"),
-            (base_cmd + all_pkgs + ["--user"],                  "--user"),
+            ((), "standard"),
+            (("--break-system-packages",), "--break-system-packages (PEP 668)"),
+            (("--user",), "--user"),
         ]
 
-    print(f"  Installing: {', '.join(all_pkgs)}...")
+    print(f"  Installing dependencies: {', '.join(manquantes)}...")
     last_err = ""
-    for cmd, label in strategies:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            last_err = f"{label}: {e}"; continue
-        if r.returncode == 0:
-            importlib.invalidate_caches()
-            still = [pkg for mod, pkg in _DEPS_CRITIQUES
-                     if importlib.util.find_spec(mod) is None]
-            if not still:
-                print(f"  ✓ Installation OK ({label})")
-                return
-            last_err = f"pip OK mais imports manquants : {still}"
-        else:
-            last_err = (r.stderr or r.stdout or "").strip()
-            if last_err:
-                last_err = "\n  ".join(last_err.split("\n")[-3:])
-
-    # Retry sans optionnelles
-    if opt_pkgs and crit_pkgs:
-        print(f"  Retry without optional ({', '.join(opt_pkgs)})...")
-        ok, err = _pip_install(sys.executable, crit_pkgs, "courant-crit")
+    for options, label in strategies:
+        ok, err = _installer_verrou(sys.executable, *options)
         if ok:
             importlib.invalidate_caches()
-            still = [pkg for mod, pkg in _DEPS_CRITIQUES
-                     if importlib.util.find_spec(mod) is None]
-            if not still:
-                print("  ✓ Critical deps installed (optional unavailable).")
-                return
+            print(f"  ✓ Installation OK ({label})")
+            return
+        last_err = f"{label}: {err}"
 
-    _afficher_erreur_deps(crit_pkgs,
+    _afficher_erreur_deps(manquantes,
                           hint=f"Dernier message pip : {last_err}" if last_err else "")
     sys.exit(1)
 
 
 def _installer_deps_et_quitter():
-    """--installer-deps : crée ~/.gpxsolar/venv, y installe TOUTES les deps
-    (critiques + optionnelles + GUI plateforme) puis quitte SANS lancer la GUI.
+    """--installer-deps : crée ~/.gpxsolar/venv, y installe le verrou complet
+    (requirements.txt) puis quitte SANS lancer la GUI.
 
     Appelé par les scripts setup_build_* (équivalent du --installer-deps de
     lidar2map). Le venv ainsi équipé sert ensuite à PyInstaller pour le build.
@@ -426,20 +352,13 @@ def _installer_deps_et_quitter():
             print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
             sys.exit(1)
 
-    crit = [pkg for _, pkg in _DEPS_CRITIQUES]
-    opt  = [pkg for _, pkg in _DEPS_OPTIONNELLES]
     print(f"  Installing dependencies in {venv_path} (3-5 min)...")
-    ok, err = _pip_install(venv_py, crit + opt, "installer-deps")
+    ok, err = _installer_verrou(venv_py)
     if not ok:
-        print("  Bulk install failed, retrying critical deps only...")
-        ok, err = _pip_install(venv_py, crit, "installer-deps-crit")
-        if ok:
-            for o in opt:
-                ok_one, _ = _pip_install(venv_py, [o], f"opt-{o}")
-                print(f"    {'✓' if ok_one else '⚠'} {o} : {'OK' if ok_one else 'failed - reduced functionality'}")
-        else:
-            print(f"  ERROR installing critical deps:\n  {err}")
-            sys.exit(1)
+        print(f"  ERROR installing the dependencies:\n  {err}")
+        sys.exit(1)
+    (venv_path / _installation.MARQUE_VERROU).write_text(
+        _installation.empreinte_verrou() + "\n")
     print(f"  ✓ Dependencies installed in {venv_path}")
     sys.exit(0)
 
@@ -465,11 +384,11 @@ def _bootstrap_environnement():
     mode = _resoudre_mode_bootstrap()
     print(f"  [bootstrap] mode={mode} python={sys.executable}")
     if mode == "none":
-        manquantes = _imports_manquants(_DEPS_CRITIQUES)
+        manquantes = _installation.dependances_absentes(_installation.dependances_directes())
         if manquantes:
             _afficher_erreur_deps(manquantes, hint="Mode --bootstrap=none actif.")
             sys.exit(1)
-        print("  [bootstrap] all critical dependencies are importable")
+        print("  [bootstrap] all dependencies are installed")
         return
     if mode == "pip":
         _bootstrap_pip_courant()

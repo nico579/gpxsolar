@@ -5,9 +5,10 @@
 #   1. python3.12 + python3.12-venv via apt
 #      (python3.12-venv est un paquet séparé sur Debian/Ubuntu — sans lui,
 #       la création de venv est impossible)
-#   2. --installer-deps → toutes les dépendances Python dans ~/.gpxsolar/venv
-#      (dont pystray pour l'icône de l'interface web)
-#   3. PyInstaller dans ce venv
+#   2. --installer-deps → le verrou requirements.txt (versions exactes,
+#      empreintes vérifiées) dans ~/.gpxsolar/venv, dont pystray pour l'icône
+#      de l'interface web
+#   3. PyInstaller dans ce venv (requirements-build.txt, versions figées)
 #
 # (Contrairement à lidar2map, gpxsolar n'a PAS besoin de JRE ni d'osmosis.)
 #
@@ -43,7 +44,7 @@ ok "Dépendances installées dans $VENV"
 
 # ── 3. PyInstaller ────────────────────────────────────────────────────────────
 step "3/3" "PyInstaller"
-"$VENV/bin/pip" install --quiet --disable-pip-version-check pyinstaller
+"$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --require-hashes -r "$SCRIPT_DIR/requirements-build.txt"
 ok "PyInstaller $("$VENV/bin/pyinstaller" --version)"
 
 echo ""

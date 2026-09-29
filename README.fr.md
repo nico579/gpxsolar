@@ -74,7 +74,8 @@ Deux façons d'utiliser gpxsolar :
 
 Au premier lancement, le script crée `~/.gpxsolar/venv` et y installe ses
 dépendances (numpy, pyproj, rasterio, shapely, pysolar, pystray, simplekml,
-timezonefinder, gpxpy, pandas…). Quelques centaines de Mo, **une seule fois**.
+timezonefinder, gpxpy, pandas…), aux versions exactes et avec les empreintes
+SHA-256 du fichier `requirements.txt`. Quelques centaines de Mo, **une seule fois**.
 
 #### Windows 10+
 ```powershell

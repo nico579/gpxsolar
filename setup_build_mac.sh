@@ -4,9 +4,10 @@
 # cross-compilation possible avec PyInstaller.
 #
 # 1. Installe Python 3.12 si absent (depuis python.org)
-# 2. Lance gpxsolar.py --installer-deps -> cree ~/.gpxsolar/venv + toutes les
-#    deps (dont pystray et pyobjc pour l'icône de la barre des menus)
-# 3. Installe PyInstaller
+# 2. Lance gpxsolar.py --installer-deps -> cree ~/.gpxsolar/venv + le verrou
+#    requirements.txt (versions exactes, empreintes verifiees), dont pystray
+#    et pyobjc pour l'icône de la barre des menus
+# 3. Installe PyInstaller (requirements-build.txt, versions figees)
 #
 # (Contrairement a lidar2map, gpxsolar n'a PAS besoin de JRE ni d'osmosis.)
 #
@@ -59,7 +60,7 @@ ok "Dependances installees dans $VENV"
 
 # -- 3. PyInstaller ------------------------------------------------------------
 step "3/3" "PyInstaller"
-"$VENV/bin/pip" install --quiet --disable-pip-version-check pyinstaller
+"$VENV/bin/python" -m pip install --quiet --disable-pip-version-check --require-hashes -r "$SCRIPT_DIR/requirements-build.txt"
 ok "PyInstaller $("$VENV/bin/pyinstaller" --version)"
 
 echo ""

@@ -13,8 +13,10 @@ Exécution :
 """
 
 import os
+import re
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -278,6 +280,97 @@ class EnvironnementSysteme(unittest.TestCase):
         source = (RACINE / "gpxsolar.py").read_text(encoding="utf-8")
         appel = source.index("_installation.retablir_environnement_systeme()")
         self.assertLess(appel, source.index("subprocess.run("))
+
+
+class Dependances(unittest.TestCase):
+    """Dépendances déclarées une fois (requirements.in), verrouillées pour
+    les trois systèmes (requirements.txt), plus PyInstaller pour construire
+    (requirements-build.txt). Jumelle de VerrouTests de lidar2map."""
+
+    @staticmethod
+    def _pins(fichier):
+        pins = {}
+        for ligne in (RACINE / fichier).read_text(encoding="utf-8").splitlines():
+            if ligne[:1].isalnum() and "==" in ligne:
+                nom, reste = ligne.split("==", 1)
+                version, _, marqueur = reste.partition(";")
+                pins[(_installation.nom_normalise(nom),
+                      marqueur.replace("\\", "").strip())] = version.strip()
+        return pins
+
+    def test_dependances_directes_sans_versions_ni_marqueurs(self):
+        noms = _installation.dependances_directes(conditionnelles=True)
+        for attendu in ("pytz", "srtm.py", "pysolar", "pandas", "rasterio", "pystray",
+                        "nico579-commons", "numba", "py7zr"):
+            self.assertIn(attendu, noms)
+        for nom in noms:
+            self.assertRegex(nom, r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    def test_les_conditionnelles_ne_sont_pas_exigees_au_demarrage(self):
+        # numba n'a pas de roue pour les Mac Intel : absent à bon droit de ce
+        # système, le contrôle au démarrage ne l'exige pas.
+        requises = _installation.dependances_directes()
+        self.assertIn("rasterio", requises)
+        self.assertNotIn("numba", requises)
+        with tempfile.TemporaryDirectory() as dossier:
+            fichier = Path(dossier) / "requirements.in"
+            fichier.write_text("# commentaire\n-c contraintes.txt\nPillow>=10  # image\n"
+                               "numba ; sys_platform != 'darwin'\nlaspy[lazrs]\n",
+                               encoding="utf-8")
+            self.assertEqual(_installation.dependances_directes(fichier),
+                             ["Pillow", "laspy"])
+            self.assertEqual(
+                _installation.dependances_directes(fichier, conditionnelles=True),
+                ["Pillow", "numba", "laspy"])
+
+    def test_chaque_dependance_directe_est_dans_les_deux_verrous(self):
+        for fichier in ("requirements.txt", "requirements-build.txt"):
+            verrouilles = {nom for nom, _ in self._pins(fichier)}
+            with self.subTest(verrou=fichier):
+                for nom in _installation.dependances_directes(conditionnelles=True):
+                    self.assertIn(_installation.nom_normalise(nom), verrouilles)
+
+    def test_le_verrou_de_construction_ajoute_pyinstaller_aux_memes_versions(self):
+        execution = self._pins("requirements.txt")
+        construction = self._pins("requirements-build.txt")
+        self.assertEqual({k: construction.get(k) for k in execution}, execution)
+        self.assertIn("pyinstaller", {nom for nom, _ in construction})
+        self.assertNotIn("pyinstaller", {nom for nom, _ in execution})
+
+    def test_chaque_paquet_verrouille_porte_ses_empreintes(self):
+        # Chaque entrée commence par son nom en début de ligne ; les lignes
+        # d'empreintes et de commentaires qui la suivent sont indentées.
+        for fichier in ("requirements.txt", "requirements-build.txt"):
+            texte = (RACINE / fichier).read_text(encoding="utf-8")
+            entrees = [e for e in re.split(r"\n(?=[A-Za-z0-9])", texte)
+                       if e[:1].isalnum()]
+            self.assertGreater(len(entrees), 20)
+            for entree in entrees:
+                with self.subTest(verrou=fichier, paquet=entree.split("==", 1)[0]):
+                    self.assertIn("--hash=sha256:", entree)
+
+    def test_absents_trouves_par_les_metadonnees_sous_leurs_noms_normalises(self):
+        installees = [types.SimpleNamespace(metadata={"Name": n})
+                      for n in ("pillow", "srtm_py", "Rasterio")]
+        self.assertEqual(
+            _installation.dependances_absentes(
+                ["Pillow", "srtm.py", "rasterio", "numba"], distributions=installees),
+            ["numba"])
+
+    def test_commande_d_installation_verifie_les_empreintes_du_verrou(self):
+        self.assertEqual(
+            _installation.commande_installation("python", "--user"),
+            ["python", "-m", "pip", "install", "-q", "--disable-pip-version-check",
+             "--require-hashes", "-r", str(_installation.VERROU), "--user"])
+
+    def test_empreinte_du_verrou_change_avec_son_contenu(self):
+        with tempfile.TemporaryDirectory() as dossier:
+            verrou = Path(dossier) / "requirements.txt"
+            verrou.write_text("a==1 \\\n    --hash=sha256:00\n", encoding="utf-8")
+            avant = _installation.empreinte_verrou(verrou)
+            verrou.write_text("a==2 \\\n    --hash=sha256:00\n", encoding="utf-8")
+            self.assertNotEqual(_installation.empreinte_verrou(verrou), avant)
+            self.assertEqual(len(avant), 64)
 
 
 if __name__ == "__main__":

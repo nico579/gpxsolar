@@ -88,8 +88,12 @@ Le onedir est buildé en **2 passes Analysis** :
 | `_loader.py` | Entry point du binaire (ne change jamais) |
 | `_dossiers.py` | Dossiers d'état (`gpxsolar-data`) et de sorties (`Documents/gpxsolar`), reprise de l'état d'une 1.3 : jumeau de celui de lidar2map |
 | `_atomic_files.py` | Écriture atomique et verrou entre processus, sous-ensemble de celui de lidar2map |
-| `_installation.py` | Dossier du programme, ménage de ce qu'un lanceur ≤ 1.4 laissait, `--desinstaller` : jumeau des fonctions de lidar2map |
+| `_installation.py` | Dossier du programme, ménage de ce qu'un lanceur ≤ 1.4 laissait, `--desinstaller` : jumeau des fonctions de lidar2map ; et la lecture du verrou (paquets absents, empreinte, ligne de commande de pip) |
 | `_serve_web.py` | Serveur HTTP local de l'interface (`gui/`, routes `/api/*`, refus des provenances étrangères) : copie de celui de lidar2map |
+| `requirements.in` | Les dépendances, déclarées une seule fois (les noms, sans versions) |
+| `requirements.txt` | Le verrou : version exacte et empreinte SHA-256 de chaque paquet, pour les trois systèmes à la fois, généré par uv (voir § 8) |
+| `requirements-build.in`, `requirements-build.txt` | Le même verrou plus PyInstaller, pour construire le binaire |
+| `test_bootstrap.py` | Épreuve de l'installation des dépendances (venv, pip, none, `--installer-deps`), avec pip, venv et relance simulés |
 | `gpxsolar_win.spec` | Spec onedir **Windows ET Linux** (ELF) |
 | `gpxsolar_win_build.ps1` | Build Windows (une passe PyInstaller) |
 | `setup_build_windows.ps1` | Prépare la machine Windows |
@@ -104,8 +108,9 @@ Le onedir est buildé en **2 passes Analysis** :
 | `.github/workflows/release.yml` | **Release** : compile 3 OS + publie, au push d'un tag `v*` |
 
 Le venv de build est `~/.gpxsolar/venv` sur les 3 OS, créé par le setup via
-`gpxsolar.py --installer-deps` (qui installe toutes les deps puis quitte sans
-lancer la GUI), avec PyInstaller ajouté ensuite.
+`gpxsolar.py --installer-deps` (qui installe le verrou `requirements.txt` puis
+quitte sans lancer la GUI), avec PyInstaller ajouté ensuite par
+`requirements-build.txt`.
 
 ---
 
@@ -313,3 +318,85 @@ Notes :
   différence y est réelle ;
 - si un changement modifie légitimement le témoin (correction du modèle,
   nouveau lissage...), mettre à jour ce tableau dans le même commit.
+
+---
+
+## 8. Dépendances
+
+Les dépendances de gpxsolar sont déclarées **une seule fois**, dans
+`requirements.in` (les noms, sans versions), et verrouillées dans
+`requirements.txt` : la version exacte et l'empreinte SHA-256 de chacun des
+paquets, indirects compris, pour Windows, macOS et Linux à la fois. Tout le
+reste l'installe, sans liste à tenir :
+
+| Qui | Comment |
+|---|---|
+| Mode sources (`python gpxsolar.py`) | crée `~/.gpxsolar/venv` et y installe le verrou, réinstallé quand un verrou plus récent arrive avec une mise à jour |
+| Construction (`setup_build_*`) | le même, puis `requirements-build.txt` (le même verrou plus PyInstaller) |
+| CI | `pip install --require-hashes -r requirements.txt` |
+
+Avant ce verrou, la liste des paquets vivait à quatre endroits (deux listes
+dans `gpxsolar.py`, une dans `ci.yml`, une dans `smoke.yml`) et aucune version
+n'était figée : deux constructions du même commit, à un mois d'écart,
+n'embarquaient pas les mêmes bibliothèques.
+
+### Ajouter, retirer ou mettre à jour un paquet
+
+Modifier `requirements.in` (ou demander la mise à jour d'un paquet), puis
+régénérer les deux verrous avec [uv](https://docs.astral.sh/uv/) (0.9 ou plus ;
+`pip install uv`) :
+
+```bash
+uv pip compile requirements.in --universal --python-version 3.9 --generate-hashes -o requirements.txt
+uv pip compile requirements-build.in --universal --python-version 3.9 --generate-hashes -o requirements-build.txt
+# une seule mise à jour, sans toucher au reste :
+uv pip compile requirements.in --universal --python-version 3.9 --generate-hashes \
+    --upgrade-package rasterio -o requirements.txt
+```
+
+`--universal` produit un seul fichier valable pour tous les systèmes et toutes
+les versions de Python depuis 3.9 : les versions qui diffèrent (numpy, scipy...)
+portent un marqueur d'environnement, que pip évalue à l'installation.
+`pip-compile` de pip-tools ne sait pas le faire (il résout pour la machine où
+il tourne), d'où uv. Le fichier produit est un `requirements.txt` ordinaire,
+que le pip d'un Python nu comprend : le bootstrap n'a pas besoin d'uv.
+
+Le job « Verrous des dependances » de la CI vérifie, à chaque changement, que
+les deux verrous se résolvent pour les quatre systèmes de construction de
+`release.yml` (Windows, Linux, macOS Apple Silicon et Intel), en roues, sauf
+les paquets qui n'en ont pas et que la CI nomme explicitement : un verrou
+régénéré qui choisirait une version sans roue pour l'un des systèmes
+casserait sa construction le jour de la release.
+
+### Quatre points à connaître
+
+- **Mac Intel** : numba ne publie plus de roue macOS x86_64 depuis la 0.61.
+  Le verrou l'exclut sur ce seul système (marqueur dans `requirements.in`) et
+  gpxsolar y calcule en NumPy pur, comme avant le verrou : son installation
+  y échouait déjà, sans bloquer le démarrage. lidar2map, lui, garde sur ces
+  Mac la dernière pile qui a des roues (numba 0.60).
+- **Paquets installés depuis leurs sources** : `simplekml` et `srtm.py` ne
+  sont publiés qu'en source, `timezonefinder` n'a de roues que pour Linux
+  depuis la 8.2, et `h3` n'en a pas pour les Mac Intel. pip les construit à
+  l'installation (l'archive source a son empreinte dans le verrou). Le job de
+  la CI nomme exactement ceux-là, système par système : un nouveau paquet sans
+  roue le ferait échouer au lieu de passer inaperçu.
+- **Tout ou rien** : `pip install --require-hashes -r` n'installe rien si un
+  seul paquet échoue. Avant le verrou, un paquet facultatif qui ne s'installait
+  pas était laissé de côté et gpxsolar démarrait sans lui. Désormais, un
+  paquet sans roue pour votre version de Python (une 3.13 ou 3.14 trop
+  récente, par exemple) bloque l'installation, avec le message de pip. La CI
+  garantit les roues pour Python 3.12 sur les quatre systèmes ; pour une autre
+  version de Python, en cas d'échec, utiliser 3.12.
+- Au démarrage, `python gpxsolar.py` ne relance pas pip tant que les paquets
+  de `requirements.in` sont installés ; ceux qui portent un marqueur (numba)
+  n'y sont pas exigés, car ils manquent à bon droit sur certains systèmes.
+  `--bootstrap=pip` installe le verrou dans l'environnement courant, **quitte
+  à changer la version de paquets déjà installés** : préférer le venv par
+  défaut, ou `--bootstrap=none` pour gérer soi-même.
+
+Le bootstrap (`_installation.py`) est le jumeau de celui de lidar2map
+(`_bootstrap_runtime.py`) : il ne peut pas vivre dans `nico579-commons`, car il
+s'exécute avant que le moindre paquet soit installé, celui-ci compris. Deux
+différences voulues : numba est exclu sur Mac Intel ici (lidar2map le fixe à
+0.60), et gpxsolar n'a ni JRE ni osmosis à installer.
