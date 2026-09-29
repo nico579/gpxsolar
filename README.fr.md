@@ -252,6 +252,11 @@ démarre sur le port suivant. Options du mode interface : `--serve-gui` suivi
 de `--port N` (port de départ, 8768 par défaut), `--no-browser`, `--no-tray`
 ou `--new-instance` ; voir `gpxsolar --serve-gui --help`.
 
+Pendant qu'il tourne, son icône de la zone de notification propose le même
+menu que les autres applications de l'auteur : Ouvrir, « Mettre à jour vers
+x.y » quand une version plus récente est publiée (ouvre la page de cette
+version), Redémarrer, Arrêter, et « Créer un raccourci sur le Bureau ».
+
 ### Mode ligne de commande (headless)
 
 Dès qu'on passe un argument (autre que `--serve-gui`), gpxsolar calcule
@@ -435,4 +440,4 @@ Données et outils :
 - **NASA / USGS** — SRTM ; **Copernicus** — DEM GLO-30
 - **ESA WorldCover** — couverture du sol / végétation
 - Bibliothèques : pysolar, pyproj, rasterio, shapely, numpy, pandas, gpxpy,
-  simplekml, timezonefinder, pystray, Pillow, numba.
+  simplekml, timezonefinder, pystray, Pillow, numba, nico579-commons.

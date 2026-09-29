@@ -47,7 +47,7 @@ jobs:
 
       - name: Dependances critiques communes
         # Même liste que ci.yml (l'import de gpxsolar les exige toutes).
-        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pystray simplekml shapely Pillow pyproj rasterio
+        run: pip install pytz srtm.py pysolar gpxpy pandas requests numpy timezonefinder pystray "nico579-commons>=0.3,<0.4" simplekml shapely Pillow pyproj rasterio
 
       - name: Smoke reseau
         run: python smoke_gpxsolar.py

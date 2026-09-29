@@ -122,6 +122,10 @@ _DEPS_CRITIQUES = [
     # le build l'embarque toujours. Sans elle, le serveur tourne quand même
     # (arrêt par Ctrl+C).
     ("pystray",         "pystray"),
+    # Briques communes aux quatre applications (menu de l'icône, relance,
+    # raccourci, recherche de version), en fourchette : une version
+    # incompatible de la bibliothèque ne peut pas entrer dans un build.
+    ("nico579_commons", "nico579-commons>=0.3,<0.4"),
     ("simplekml",       "simplekml"),
     ("shapely",         "shapely"),
     ("PIL",             "Pillow"),
@@ -194,6 +198,14 @@ def _imports_manquants(deps):
     return [pkg for mod, pkg in deps if _absent(mod)]
 
 
+def _pour_le_terminal(paquets):
+    """Paquets pip à coller dans un terminal : une fourchette de versions
+    entre guillemets doubles (compris par cmd, PowerShell et sh), sans quoi
+    < et > deviendraient des redirections."""
+    return " ".join(f'"{p}"' if any(c in p for c in "<>|&") else p
+                    for p in paquets)
+
+
 def _afficher_erreur_deps(manquantes, hint=""):
     print()
     print("  ╔══════════════════════════════════════════════════════════════╗")
@@ -204,13 +216,14 @@ def _afficher_erreur_deps(manquantes, hint=""):
         print(f"  {hint}")
     print()
     print("  Solutions:")
-    print(f"    pip install {' '.join(manquantes)}")
+    print(f"    pip install {_pour_le_terminal(manquantes)}")
     print("    # or create a venv:")
     print("    python -m venv ~/.gpxsolar/venv")
     if platform.system() == "Windows":
-        print("    %USERPROFILE%\\.gpxsolar\\venv\\Scripts\\pip install " + " ".join(manquantes))
+        print("    %USERPROFILE%\\.gpxsolar\\venv\\Scripts\\pip install "
+              + _pour_le_terminal(manquantes))
     else:
-        print(f"    ~/.gpxsolar/venv/bin/pip install {' '.join(manquantes)}")
+        print(f"    ~/.gpxsolar/venv/bin/pip install {_pour_le_terminal(manquantes)}")
     print()
 
 
@@ -5039,11 +5052,6 @@ PORT_RANGE_SIZE = 10
 SCRIPT = (Path(sys.executable).resolve() if getattr(sys, "frozen", False)
           else Path(__file__).resolve())
 
-TRAY_LIBELLES = {
-    "fr": ("Ouvrir", "Redémarrer", "Arrêter"),
-    "en": ("Open", "Restart", "Stop"),
-}
-
 
 def _construire_parser_serve_gui():
     """Parser du mode --serve-gui, à part de main() : ses options ne sont
@@ -5176,58 +5184,88 @@ def _premier_port_libre(port_depart: int, gui_dir: Path, api_routes: dict,
     return None, None
 
 
-def _construire_tray_icon(gui_dir: Path, on_open, on_restart, on_stop, lang="en"):
-    """Icône de zone de notification (Ouvrir/Redémarrer/Arrêter) pendant que
-    le serveur web tourne dans son thread de fond. pystray + Pillow
-    seulement : Pillow est déjà une dépendance de gpxsolar, et pystray parle
-    directement l'API native de chaque OS, à l'inverse de pywebview/Qt.
+def _verificateur_de_version():
+    """Dernière release publiée de gpxsolar, demandée à GitHub au plus une
+    fois par heure par un fil de fond (nico579_commons.maj) : le menu de
+    l'icône la lit sans jamais attendre le réseau."""
+    from nico579_commons import maj
+    return maj.Verificateur("nico579/gpxsolar", VERSION)
 
-    Menu fixe, jamais modifié hors du thread principal : sous macOS, AppKit
-    n'admet les changements d'interface que depuis ce thread, et macOS 27
-    tue le processus sinon (vu sur blink2video, issue #31)."""
-    import pystray
-    from PIL import Image
-    ouvrir, redemarrer, arreter = TRAY_LIBELLES.get(lang, TRAY_LIBELLES["en"])
-    image = Image.open(_fichier_icone(gui_dir))
-    menu = pystray.Menu(
-        pystray.MenuItem(ouvrir, on_open, default=True),
-        pystray.MenuItem(redemarrer, on_restart),
-        pystray.MenuItem(arreter, on_stop),
+
+def _actions_tray(url: str, gui_dir: Path, arreter, verificateur):
+    """Ce que gpxsolar donne au menu de l'icône, le même dans les quatre
+    applications (nico579_commons.tray) : Ouvrir, « Mettre à jour vers
+    x.y » quand une version plus récente est publiée (ouvre la page de la
+    release, gpxsolar ne s'installe pas lui-même), Redémarrer, Arrêter,
+    Créer un raccourci sur le Bureau. Tout le reste passe par la page.
+
+    ``arreter`` : arrête le calcul en cours et libère le port."""
+    import webbrowser
+    from nico579_commons import relance
+    from nico579_commons import tray as apptray
+
+    def _redemarrer():
+        # Mêmes arguments, port libéré avant. Figé, _loader.py remplace
+        # argv[0] par _internal/gpxsolar.py : relance.commande() relance
+        # l'exécutable, pas ce fichier texte.
+        arreter()
+        relance.relancer(relance.commande(), nom="gpxsolar", cwd=os.getcwd())
+
+    def _mettre_a_jour():
+        info = verificateur.disponible()
+        webbrowser.open(info["page"] if info else verificateur.page_des_releases)
+
+    return apptray.Actions(
+        ouvrir=lambda: webbrowser.open(url),
+        redemarrer=_redemarrer,
+        arreter=arreter,
+        version_disponible=lambda: (verificateur.disponible() or {}).get("version"),
+        mettre_a_jour=_mettre_a_jour,
+        mettre_a_jour_referme=False,
+        creer_raccourci=lambda: _creer_raccourci_bureau(gui_dir),
+        langue=_langue_console,
     )
-    return pystray.Icon("gpxsolar", image, "gpxsolar", menu)
 
 
-def _commande_relance(*, frozen, executable, argv):
-    """Commande qui relance ce même serveur avec les mêmes arguments.
+def _commande_raccourci():
+    """(commande, dossier) du raccourci sur le Bureau : le programme sans
+    argument, qui sert l'interface et ouvre le navigateur. Depuis les
+    sources sous Windows, pythonw : pas de console à côté du navigateur."""
+    if getattr(sys, "frozen", False):
+        return [str(SCRIPT)], SCRIPT.parent
+    python = Path(sys.executable)
+    if sys.platform == "win32" and python.with_name("pythonw.exe").is_file():
+        python = python.with_name("pythonw.exe")
+    return [str(python), str(SCRIPT)], SCRIPT.parent
 
-    Figé, ``argv[0]`` ne désigne PAS l'exécutable : _loader.py le remplace
-    par le chemin de ``_internal/gpxsolar.py`` (texte, ni exécutable ni
-    lançable par CreateProcess sous Windows). On relance donc l'exe courant
-    (``executable``), qui depuis la 1.5 est le programme lui-même."""
-    if frozen:
-        return [executable] + list(argv[1:])
-    return [executable] + list(argv)
+
+def _creer_raccourci_bureau(gui_dir: Path) -> int:
+    from nico579_commons import raccourci
+    commande, dossier = _commande_raccourci()
+    icone = _fichier_icone(gui_dir)
+    png = icone.with_suffix(".png")
+    if sys.platform != "win32" and png.is_file():
+        # Fichier .desktop : un PNG se lit partout, un ICO pas toujours.
+        icone = png
+    # reduit : programme console qui cache sa fenêtre dès son démarrage
+    # (hide-early) ; née réduite, elle ne fait pas d'éclair à l'écran.
+    return raccourci.creer("gpxsolar", commande, dossier, icone=icone,
+                           description="gpxsolar", reduit=True,
+                           langue=_langue_console())
 
 
-def _relancer_process():
-    """Relance un nouveau process avec les mêmes arguments, pour un
-    Redémarrer depuis l'icône. Le process courant doit avoir déjà libéré le
-    port (server.server_close()) avant cet appel, sinon le nouveau échouerait
-    à écouter dessus.
-
-    CREATE_NO_WINDOW seul, jamais combiné à DETACHED_PROCESS : la
-    combinaison rendait le lancement erratique, constaté en réel sur
-    watch2notif (2026-09-07) pour ce même besoin, un process qui doit
-    survivre à son parent, lancé sans fenêtre visible."""
-    commande = _commande_relance(
-        frozen=getattr(sys, "frozen", False),
-        executable=sys.executable,
-        argv=sys.argv,
-    )
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    subprocess.Popen(
-        commande, cwd=os.getcwd(), close_fds=True, creationflags=flags,
-    )
+def _construire_tray_icon(gui_dir: Path, actions):
+    """Icône de zone de notification pendant que le serveur web tourne dans
+    son thread de fond : nico579_commons.tray (pystray + Pillow), le même
+    menu dans les quatre applications. Le menu est reconstruit toutes les
+    5 s pour « Mettre à jour » et la langue, sous macOS sur le fil
+    principal (issue #31 de blink2video, macOS 27 tuait le processus).
+    construire() importe pystray, qui lève sans affichage (Linux) :
+    l'appelant continue alors sans icône."""
+    from nico579_commons import tray as apptray
+    tray = apptray.Tray("gpxsolar", _fichier_icone(gui_dir), actions)
+    tray.construire()
+    return tray
 
 
 def _langue_console() -> str:
@@ -5297,7 +5335,7 @@ def _demarrer_nouvelle_instance(*, port_depart, sans_icone=False,
     "port": N} ; la page ouvre alors l'onglet elle-même.
 
     Processus détaché, sans fenêtre ni console (mêmes drapeaux que
-    _relancer_process) : il vit indépendamment de celui-ci et s'arrête par
+    nico579_commons.relance) : il vit indépendamment de celui-ci et s'arrête par
     sa propre icône ; refusé quand ce serveur tourne lui-même sans icône
     (--no-tray), l'instance ne pourrait pas être arrêtée."""
     if sans_icone:
@@ -5804,25 +5842,14 @@ def main_serve_gui(args, options):
     # garantie qu'un Ctrl+C interrompe proprement la boucle native de
     # pystray selon l'OS, contrairement à time.sleep() ci-dessous - deux
     # chemins complets et séparés plutôt qu'un mélange fragile des deux).
-    action = {"quoi": "stop"}
-
-    def _on_open(icon, item):
-        import webbrowser
-        webbrowser.open(url)
-
-    def _on_restart(icon, item):
-        action["quoi"] = "restart"
-        icon.stop()
-
-    def _on_stop(icon, item):
-        action["quoi"] = "stop"
-        icon.stop()
-
-    icon = None
+    # Vérificateur créé même sans icône : il importe nico579_commons, dont
+    # l'absence dans un binaire fait ainsi échouer le smoke (--no-tray).
+    verificateur = _verificateur_de_version()
+    tray = None
     if not options.no_tray:
         try:
-            icon = _construire_tray_icon(gui_dir, _on_open, _on_restart, _on_stop,
-                                         lang=_langue_console())
+            tray = _construire_tray_icon(gui_dir, _actions_tray(
+                url, gui_dir, _arreter_le_calcul_et_le_serveur, verificateur))
         except Exception as exc:
             # Linux sans affichage (SSH, session sans bureau) : pystray tente
             # une connexion X dès l'import et lève. Le serveur tournait déjà :
@@ -5831,7 +5858,7 @@ def main_serve_gui(args, options):
                   f" - running without it.")
             etat_serveur["sans_icone"] = True
 
-    if icon is None:
+    if tray is None:
         print("  Ctrl+C to stop.")
         try:
             while True:
@@ -5841,12 +5868,14 @@ def main_serve_gui(args, options):
             print("\n  Web GUI server stopped.")
             sys.exit(0)
 
+    verificateur.veiller(tray.arret)
     print("  Look for the gpxsolar icon in the system tray.")
-    icon.run()  # bloque jusqu'à icon.stop() (Redémarrer ou Arrêter)
+    # Bloque jusqu'à Redémarrer ou Arrêter, dont l'action (calcul arrêté,
+    # port libéré, relance) tourne hors de la boucle de l'icône ;
+    # executer() l'attend avant de rendre la main.
+    tray.executer()
 
-    _arreter_le_calcul_et_le_serveur()
-    if action["quoi"] == "restart":
-        _relancer_process()
+    _arreter_le_calcul_et_le_serveur()   # déjà fait par l'action : sans effet
     print("\n  Web GUI server stopped.")
     sys.exit(0)
 

@@ -186,14 +186,76 @@ class FonctionsGpxsolarTests(unittest.TestCase):
                              str(Path.home().resolve()))
 
     def test_commande_relance(self):
-        ns = _extraire("_commande_relance")
-        relance = ns["_commande_relance"]
-        self.assertEqual(relance(frozen=True, executable="C:/P/gpxsolar.exe",
-                                 argv=["C:/P/_internal/gpxsolar.py", "--serve-gui"]),
+        # Figé, _loader.py remplace argv[0] par _internal/gpxsolar.py : la
+        # relance passe par nico579_commons.relance, qui relance l'exécutable.
+        from nico579_commons import relance
+        self.assertEqual(relance.commande(fige=True, executable="C:/P/gpxsolar.exe",
+                                          argv=["C:/P/_internal/gpxsolar.py", "--serve-gui"]),
                          ["C:/P/gpxsolar.exe", "--serve-gui"])
-        self.assertEqual(relance(frozen=False, executable="python",
-                                 argv=["gpxsolar.py"]),
+        self.assertEqual(relance.commande(fige=False, executable="python",
+                                          argv=["gpxsolar.py"]),
                          ["python", "gpxsolar.py"])
+
+    def _actions(self, verificateur, journal):
+        ns = _extraire("_actions_tray", _langue_console=lambda: "fr",
+                       _creer_raccourci_bureau=lambda gui_dir: journal.append("raccourci"))
+        return ns["_actions_tray"]("http://127.0.0.1:8765/", ROOT / "gui",
+                                   lambda: journal.append("arrete"), verificateur)
+
+    def test_menu_commun(self):
+        # Le même menu que blink2video, lidar2map et watch2notif, dont
+        # « Mettre à jour vers x.y » quand une version plus récente est connue.
+        from nico579_commons import tray as apptray
+        verificateur = types.SimpleNamespace(disponible=lambda: None,
+                                             page_des_releases="")
+        actions = self._actions(verificateur, [])
+        faux = types.SimpleNamespace(
+            MenuItem=lambda texte, action, default=False, checked=None: texte)
+        self.assertEqual(apptray.entrees(actions, faux, lambda action: None),
+                         ["Ouvrir", "Redémarrer", "Arrêter",
+                          "Créer un raccourci sur le Bureau"])
+        verificateur.disponible = lambda: {"version": "1.7.0", "page": "p"}
+        self.assertEqual(apptray.entrees(actions, faux, lambda action: None)[1],
+                         "Mettre à jour vers 1.7.0")
+
+    def test_redemarrer_arrete_puis_relance(self):
+        from unittest import mock
+        from nico579_commons import relance
+        journal = []
+        actions = self._actions(types.SimpleNamespace(disponible=lambda: None), journal)
+        with mock.patch.object(relance, "relancer",
+                               side_effect=lambda commande, **o: journal.append(o["nom"])), \
+                mock.patch.object(sys, "argv", ["gpxsolar.py", "--port", "8765"]):
+            actions.redemarrer()
+        self.assertEqual(journal, ["arrete", "gpxsolar"])
+
+    def test_mettre_a_jour_ouvre_la_page_de_la_release(self):
+        from unittest import mock
+        import webbrowser
+        page = "https://github.com/nico579/gpxsolar/releases/tag/v1.7.0"
+        actions = self._actions(types.SimpleNamespace(
+            disponible=lambda: {"version": "1.7.0", "page": page}), [])
+        self.assertFalse(actions.mettre_a_jour_referme)
+        self.assertEqual(actions.version_disponible(), "1.7.0")
+        with mock.patch.object(webbrowser, "open") as ouvrir:
+            actions.mettre_a_jour()
+        ouvrir.assert_called_once_with(page)
+
+    def test_raccourci_lance_le_programme_sans_argument(self):
+        # Jamais le vrai Bureau : raccourci.creer est remplacé.
+        from unittest import mock
+        from nico579_commons import raccourci
+        ns = _extraire("SCRIPT", "_fichier_icone", "_commande_raccourci",
+                       "_creer_raccourci_bureau", _langue_console=lambda: "en")
+        commande, dossier = ns["_commande_raccourci"]()
+        self.assertEqual(commande[-1], str(ROOT / "gpxsolar.py"))
+        self.assertEqual(dossier, ROOT)
+        with mock.patch.object(raccourci, "creer", return_value=0) as creer:
+            self.assertEqual(ns["_creer_raccourci_bureau"](ROOT / "gui"), 0)
+        args, kwargs = creer.call_args
+        self.assertEqual(args[:2], ("gpxsolar", commande))
+        self.assertTrue(kwargs["reduit"])
+        self.assertTrue(Path(kwargs["icone"]).is_file())
 
     def test_textes_instance_existante(self):
         ns = _extraire("_textes_instance_existante")

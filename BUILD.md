@@ -50,8 +50,11 @@ une archive met le programme au chemin du lanceur, raccourcis compris.
 Depuis la 1.6.0, l'interface n'est plus une fenêtre : `gpxsolar.py` la sert en
 HTTP local (`_serve_web.py`, bibliothèque standard seulement) et l'ouvre dans
 le navigateur déjà installé, comme lidar2map, blink2video et watch2notif. Une
-icône de zone de notification (pystray) permet de la rouvrir, de redémarrer ou
-d'arrêter le serveur. Jusqu'à la 1.5, pywebview l'affichait dans une fenêtre
+icône de zone de notification ([nico579-commons](https://github.com/nico579/nico579-commons),
+sur pystray), au même menu que ces trois applications, permet de la rouvrir,
+d'ouvrir la page d'une version plus récente quand il y en a une, de redémarrer
+ou d'arrêter le serveur, et de poser un raccourci sur le Bureau. Jusqu'à la
+1.5, pywebview l'affichait dans une fenêtre
 Qt (PyQt6 + QtWebEngine), qui pesait 557 Mo sur les 941 du programme ; Qt y
 avait lui-même remplacé le backend WinForms de Windows, dont la couche
 pythonnet 3.1.0 gelait l'interface.
