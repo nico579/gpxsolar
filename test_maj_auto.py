@@ -20,6 +20,14 @@ from nico579_commons import maj_archive, maj_install
 RACINE = Path(__file__).resolve().parent
 
 
+def _systeme_onedir():
+    """Un dossier PyInstaller « onedir » (Windows, Linux) quel que soit le système
+    des tests : sous macOS, le bundle publié est une .app, autre disposition."""
+    nom = "Windows" if sys.platform == "win32" else "Linux"
+    return mock.patch.multiple(maj_install.platform, system=lambda: nom,
+                               machine=lambda: "x86_64")
+
+
 class AutoTest(unittest.TestCase):
     def lancer(self, *argv):
         return gpxsolar._auto_test_version(list(argv))
@@ -76,7 +84,7 @@ class Description(unittest.TestCase):
             exe = dossier / ("gpxsolar.exe" if sys.platform == "win32" else "gpxsolar")
             exe.write_bytes(b"x")
             with mock.patch.object(sys, "frozen", True, create=True), \
-                    mock.patch.object(sys, "executable", str(exe)):
+                    mock.patch.object(sys, "executable", str(exe)), _systeme_onedir():
                 disposition = gpxsolar._disposition_installation()
         self.assertEqual(disposition.install_root, dossier)
         self.assertTrue(disposition.asset_name.startswith("gpxsolar-"))
@@ -89,7 +97,7 @@ class Description(unittest.TestCase):
             exe = dossier / ("gpxsolar.exe" if sys.platform == "win32" else "gpxsolar")
             exe.write_bytes(b"x")
             with mock.patch.object(sys, "frozen", True, create=True), \
-                    mock.patch.object(sys, "executable", str(exe)):
+                    mock.patch.object(sys, "executable", str(exe)), _systeme_onedir():
                 with self.assertRaises(maj_archive.ErreurMiseAJour) as c:
                     gpxsolar._disposition_installation()
         self.assertEqual(c.exception.code, "unsafe_install")
