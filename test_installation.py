@@ -14,7 +14,6 @@ Exécution :
 
 import os
 import re
-import sys
 import tempfile
 import types
 import unittest
@@ -237,49 +236,25 @@ class RestesDeQt(unittest.TestCase):
 class EnvironnementSysteme(unittest.TestCase):
     """Programmes du système lancés depuis le binaire Linux (xdg-open, le
     navigateur) : LD_LIBRARY_PATH d'origine, pas celui que préfixe
-    PyInstaller. Jumeau des tests de lidar2map."""
-
-    BUNDLE = "/opt/gpxsolar/_internal"
-
-    def retablir(self, environ, fige=True, plateforme="linux"):
-        _installation.retablir_environnement_systeme(
-            fige=fige, plateforme=plateforme, environ=environ)
-        return environ
-
-    def test_valeur_d_origine_rendue(self):
-        environ = self.retablir({"LD_LIBRARY_PATH": f"{self.BUNDLE}:/usr/local/lib",
-                                 "LD_LIBRARY_PATH_ORIG": "/usr/local/lib"})
-        self.assertEqual(environ["LD_LIBRARY_PATH"], "/usr/local/lib")
-
-    def test_variable_absente_avant_le_bootloader_retiree(self):
-        environ = self.retablir({"LD_LIBRARY_PATH": self.BUNDLE, "PATH": "/usr/bin"})
-        self.assertNotIn("LD_LIBRARY_PATH", environ)
-        self.assertEqual(environ["PATH"], "/usr/bin")
-
-    def test_sources_gardent_le_choix_de_l_utilisateur(self):
-        environ = self.retablir({"LD_LIBRARY_PATH": "/choix/utilisateur"}, fige=False)
-        self.assertEqual(environ["LD_LIBRARY_PATH"], "/choix/utilisateur")
-
-    def test_windows_et_macos_intacts(self):
-        for plateforme in ("win32", "darwin"):
-            with self.subTest(plateforme=plateforme):
-                environ = self.retablir({"LD_LIBRARY_PATH": self.BUNDLE,
-                                         "LD_LIBRARY_PATH_ORIG": "/usr/lib"},
-                                        plateforme=plateforme)
-                self.assertEqual(environ["LD_LIBRARY_PATH"], self.BUNDLE)
-
-    def test_par_defaut_le_processus_en_cours(self):
-        with mock.patch.dict(os.environ, {"LD_LIBRARY_PATH": self.BUNDLE,
-                                          "LD_LIBRARY_PATH_ORIG": "/usr/lib"}, clear=True), \
-             mock.patch.object(sys, "frozen", True, create=True), \
-             mock.patch.object(sys, "platform", "linux"):
-            _installation.retablir_environnement_systeme()
-            self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/usr/lib")
+    PyInstaller. La fonction est celle de nico579_commons.environnement, et
+    ses comportements y sont éprouvés ; il ne reste à vérifier ici que le
+    câblage de gpxsolar.py."""
 
     def test_appelee_avant_tout_lancement_de_processus(self):
         source = (RACINE / "gpxsolar.py").read_text(encoding="utf-8")
-        appel = source.index("_installation.retablir_environnement_systeme()")
+        appel = source.index("environnement.retablir_environnement_systeme()")
         self.assertLess(appel, source.index("subprocess.run("))
+
+    def test_seulement_dans_l_executable_ou_la_bibliotheque_est_embarquee(self):
+        # Depuis les sources, la bibliothèque peut ne pas être installée avant
+        # le bootstrap, et la fonction n'y fait rien : l'import est gardé.
+        source = (RACINE / "gpxsolar.py").read_text(encoding="utf-8")
+        appel = source.index("environnement.retablir_environnement_systeme()")
+        garde = source.rindex('if getattr(sys, "frozen", False):', 0, appel)
+        self.assertLess(appel - garde, 400)
+
+    def test_la_copie_locale_n_existe_plus(self):
+        self.assertFalse(hasattr(_installation, "retablir_environnement_systeme"))
 
 
 class Dependances(unittest.TestCase):

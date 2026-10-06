@@ -1,7 +1,6 @@
 """Installation de gpxsolar depuis la 1.5.0 : le programme livré tel quel,
 ce qu'un lanceur <= 1.4 laissait derrière lui, ce que la 1.5.0 laisse dans
-_internal sous la 1.6, l'environnement rendu aux programmes du système, et
-la désinstallation.
+_internal sous la 1.6, et la désinstallation.
 
 Jusqu'à la 1.4, un petit lanceur contenait le programme zippé
 (gpxsolar_bundle.zip), l'extrayait dans le dossier de données de l'OS
@@ -10,8 +9,7 @@ Depuis la 1.5, l'archive livre directement le programme (dossier onedir, ou
 GPXSOLAR.app sous macOS), comme celles de lidar2map, blink2video et
 watch2notif. Jumeau des fonctions de lidar2map (_runtime_paths.
 dossier_programme, _bootstrap_runtime.chemins_desinstallation,
-desinstaller_lidar2map, nettoyer_ancienne_extraction et
-retablir_environnement_systeme) ; le ménage des restes de Qt est propre à
+desinstaller_lidar2map et nettoyer_ancienne_extraction) ; le ménage des restes de Qt est propre à
 gpxsolar, seul des quatre à avoir livré Qt tel quel.
 
 Dépendances : déclarées une seule fois, dans requirements.in, et installées
@@ -31,7 +29,6 @@ import hashlib
 import os
 import re
 import shutil
-import sys
 from pathlib import Path
 
 import _restes_qt
@@ -235,37 +232,6 @@ def nettoyer_restes_de_qt(*, systeme, interne, marge_s=MARGE_RESTES_S):
             continue
         retires.append(chemin)
     return retires
-
-
-def retablir_environnement_systeme(*, fige=None, plateforme=None, environ=None):
-    """Rend aux programmes du système le LD_LIBRARY_PATH d'origine.
-
-    Sous Linux, le bootloader de PyInstaller préfixe cette variable du dossier
-    de ses bibliothèques (_internal) et garde l'ancienne valeur dans
-    LD_LIBRARY_PATH_ORIG. Tout enfant en hérite : xdg-open et le navigateur
-    qu'ouvre webbrowser depuis la 1.6.0 chargeaient alors les bibliothèques
-    du binaire au lieu des leurs, et le systemd de Debian Trixie refuse une
-    libcrypto plus ancienne que la sienne (constaté sur blink2video, issue
-    #23, d'où ce rétablissement dans lidar2map et blink2video). C'est celui
-    que recommande PyInstaller pour les programmes externes :
-    https://pyinstaller.org/en/stable/runtime-information.html#ld-library-path-libpath-considerations
-
-    Appelée par gpxsolar.py dès son démarrage, avant tout lancement de
-    processus. Le chargeur d'un processus ne lit la variable qu'à son
-    démarrage : la rétablir ne change rien pour celui-ci, ni pour une
-    relance du binaire, que son bootloader préfixe de nouveau.
-    """
-    fige = getattr(sys, "frozen", False) if fige is None else fige
-    plateforme = sys.platform if plateforme is None else plateforme
-    environ = os.environ if environ is None else environ
-    if not fige or plateforme in ("win32", "darwin"):
-        return
-    origine = environ.get("LD_LIBRARY_PATH_ORIG")
-    if origine is not None:
-        environ["LD_LIBRARY_PATH"] = origine
-    else:
-        # Variable absente avant le bootloader : il n'a rien gardé à rétablir.
-        environ.pop("LD_LIBRARY_PATH", None)
 
 
 def nom_normalise(nom: str) -> str:

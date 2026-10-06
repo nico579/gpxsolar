@@ -86,10 +86,9 @@ Le onedir est buildé en **2 passes Analysis** :
 | Fichier | Rôle |
 |---|---|
 | `_loader.py` | Entry point du binaire (ne change jamais) |
-| `_dossiers.py` | Dossiers d'état (`gpxsolar-data`) et de sorties (`Documents/gpxsolar`), reprise de l'état d'une 1.3 : jumeau de celui de lidar2map |
-| `_atomic_files.py` | Écriture atomique et verrou entre processus, sous-ensemble de celui de lidar2map |
+| `_dossiers.py` | Les noms et fichiers de gpxsolar pour `nico579_commons.dossiers` (état dans `gpxsolar-data`, sorties dans `Documents/gpxsolar`, reprise de l'état d'une 1.3) : la logique est dans la bibliothèque commune |
 | `_installation.py` | Dossier du programme, ménage de ce qu'un lanceur ≤ 1.4 laissait, `--desinstaller` : jumeau des fonctions de lidar2map ; et la lecture du verrou (paquets absents, empreinte, ligne de commande de pip) |
-| `_serve_web.py` | Serveur HTTP local de l'interface (`gui/`, routes `/api/*`, refus des provenances étrangères) : copie de celui de lidar2map |
+| `_serve_web.py` | Les réglages de gpxsolar pour `nico579_commons.serveweb` (variable de proxy local, lecture des paramètres de `browse-dir`) : le serveur HTTP local (`gui/`, routes `/api/*`, refus des provenances étrangères) est dans la bibliothèque commune |
 | `requirements.in` | Les dépendances, déclarées une seule fois (les noms, sans versions) |
 | `requirements.txt` | Le verrou : version exacte et empreinte SHA-256 de chaque paquet, pour les trois systèmes à la fois, généré par uv (voir § 8) |
 | `requirements-build.in`, `requirements-build.txt` | Le même verrou plus PyInstaller, pour construire le binaire |
