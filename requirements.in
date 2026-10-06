@@ -29,7 +29,7 @@ rasterio
 # raccourci, recherche de version). Fourchette : une version incompatible de
 # la bibliothèque ne peut pas entrer dans le verrou.
 pystray
-nico579-commons>=0.4.0,<0.5
+nico579-commons>=0.4.1,<0.5
 
 # Linux : l'icône parle le protocole StatusNotifierItem par D-Bus quand le
 # bureau a un hôte (GNOME avec l'extension AppIndicator, KDE), faute de quoi
