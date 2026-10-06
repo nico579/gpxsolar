@@ -46,10 +46,12 @@ class AutoTest(unittest.TestCase):
 
 
 class Description(unittest.TestCase):
-    def test_application_sans_donnee_a_recopier(self):
-        app = gpxsolar._application_installation()
+    def test_application_sans_donnee_a_recopier_et_memes_arguments(self):
+        with mock.patch.object(sys, "argv", ["gpxsolar", "--port", "9000"]):
+            app = gpxsolar._application_installation()
         self.assertEqual(app.nom, "gpxsolar")
         self.assertEqual(app.donnees_preservees, ())
+        self.assertEqual(app.arguments_relance, ("--port", "9000"))
 
     def test_noms_d_archive_des_systemes_publies(self):
         for systeme, machine, attendu in (
