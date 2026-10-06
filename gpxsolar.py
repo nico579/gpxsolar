@@ -5067,10 +5067,11 @@ def _verificateur_de_version():
 def _application_installation():
     """Ce que nico579_commons.maj_install doit savoir de gpxsolar : ses données
     vivent hors du dossier d'installation (GPXSOLAR_HOME, dossier de données de
-    l'utilisateur), rien à recopier d'une version à l'autre ; relancée sans
-    argument, la nouvelle version rouvre l'interface."""
+    l'utilisateur), rien à recopier d'une version à l'autre ; la nouvelle
+    version repart avec les mêmes arguments que ce lancement (port...)."""
     from nico579_commons import maj_install
-    return maj_install.Application("gpxsolar", fenetre="Minimized")
+    return maj_install.Application("gpxsolar", arguments_relance=tuple(sys.argv[1:]),
+                                   fenetre="Minimized")
 
 
 def _disposition_installation():
