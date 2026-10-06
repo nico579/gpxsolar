@@ -70,7 +70,11 @@ import _installation
 # système lancés depuis le binaire Linux (xdg-open, navigateur) doivent
 # recevoir le LD_LIBRARY_PATH d'origine, pas celui que PyInstaller préfixe
 # de ses bibliothèques. Comme lidar2map et blink2video.
-_installation.retablir_environnement_systeme()
+if getattr(sys, "frozen", False):
+    # Depuis les sources la fonction ne fait rien ; l'exécutable embarque la
+    # bibliothèque commune, qu'il peut donc importer dès son démarrage.
+    from nico579_commons import environnement
+    environnement.retablir_environnement_systeme()
 
 # --desinstaller, avant tout bootstrap : les sources ne doivent pas créer un
 # venv pour le supprimer aussitôt. Jusqu'à la 1.4, seul le lanceur le
@@ -109,7 +113,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.8.0"
+VERSION      = "1.8.1"
 VERSION_DATE = "2026-09"
 
 
@@ -432,7 +436,7 @@ from collections import OrderedDict
 # Modules du projet (bibliothèque standard seulement) : dossiers d'état et de
 # sorties depuis la 1.4.0. Importés après le bootstrap, qui n'en a pas
 # besoin ; la passe 1 des specs les embarque dans le programme.
-import _atomic_files
+from nico579_commons import atomique, serveweb
 import _dossiers
 
 # Les imports tiers (maintenant disponibles)
@@ -743,11 +747,11 @@ OBSERVER_EYE_HEIGHT = 1.7
 # préférences dans le dossier d'état (gpxsolar-data) ; GPX_Ombres et les
 # caches, relatifs au dossier des sorties (Documents/gpxsolar par défaut),
 # dont main() fait le dossier courant. Calcul pur, rien n'est créé ici.
-DOSSIER_ETAT = _dossiers.dossier_etat()
+DOSSIER_ETAT = _dossiers.DOSSIERS.dossier_etat()
 SHADOW_GPX_DIR = 'GPX_Ombres'
 CONFIG_FILE = str(DOSSIER_ETAT / 'gpx_analyzer_config.json')
 HISTORY_FILE = str(DOSSIER_ETAT / 'gpx_analyzer_history.json')
-PREFS_FILE = str(DOSSIER_ETAT / _dossiers.PREFERENCES)   # langue et dossier_sorties
+PREFS_FILE = str(DOSSIER_ETAT / _dossiers.DOSSIERS.preferences)   # langue et dossier_sorties
 HISTORY_MAX_ENTRIES = 30
 # Workers de la carte d'ombre : adaptatif au lieu d'un 4 codé en dur. Le gain
 # threads plafonne car pysolar (Python pur) ne relâche pas le GIL et numba
@@ -1110,17 +1114,11 @@ def save_lang(code: str) -> bool:
     if code not in ("fr", "en"):
         return False
     try:
-        with _atomic_files.verrou_inter_processus(PREFS_FILE):
-            prefs = _atomic_files.lire_json(PREFS_FILE, {})
+        with atomique.verrou_inter_processus(PREFS_FILE):
+            prefs = atomique.lire_json(PREFS_FILE, {})
             prefs = prefs if isinstance(prefs, dict) else {}
             prefs["lang"] = code
-            temporaire = _atomic_files.chemin_part(PREFS_FILE)
-            try:
-                temporaire.write_text(json.dumps(prefs, ensure_ascii=False, indent=2),
-                                      encoding='utf-8')
-                _atomic_files.remplacer(temporaire, PREFS_FILE)
-            finally:
-                temporaire.unlink(missing_ok=True)
+            atomique.ecrire_json(PREFS_FILE, prefs)
         return True
     except (OSError, TimeoutError) as e:
         logging.warning(f"Cannot save preferences: {e}")
@@ -4950,7 +4948,7 @@ def run_gui_process(file_path, date_str, time_str, dem_source, analysis_resoluti
 # QtWebEngine pesaient 557 Mo sur les 941 du programme. Elle est désormais
 # servie en HTTP local et ouverte dans le navigateur, avec les techniques de
 # lidar2map, son jumeau, qui a fait cette migration le premier : même module
-# _serve_web.py (bibliothèque standard), même pont gui/web_bridge.js, même
+# serveweb de nico579-commons (bibliothèque standard), même pont gui/web_bridge.js, même
 # icône de zone de notification (pystray), même choix entre rejoindre
 # l'instance en cours et en démarrer une nouvelle. Écarts : pas d'accès
 # distant (écoute sur la boucle locale seulement), libellés de l'icône en
@@ -4962,7 +4960,7 @@ PORT_GUI = 8768
 HOTE_GUI = "127.0.0.1"
 
 # Un serveur = une instance Api = un seul calcul actif à la fois. Un second
-# lancement trouve le port pris : _instance_existante() reconnaît alors une
+# lancement trouve le port pris : serveweb.instance_existante() reconnaît alors une
 # instance gpxsolar (et pas un service tiers) pour proposer de la rejoindre
 # ou d'en démarrer une nouvelle, sur le premier port libre de cette plage
 # (même pattern que Jupyter Notebook et lidar2map).
@@ -5037,7 +5035,7 @@ def _api_browse_dir(path: str = "", kind: str = "", exts=None, mode: str = "") -
     mode='file' : les fichiers sont listés en plus des sous-dossiers, filtrés
     par exts s'il y en a. `kind` (racines par type de dossier chez
     lidar2map) est accepté pour garder la même route, sans usage ici."""
-    base = Path(path).expanduser() if path else _dossiers._documents()
+    base = Path(path).expanduser() if path else _dossiers.DOSSIERS.documents()
     try:
         base = base.resolve()
         if not base.is_dir():
@@ -5056,51 +5054,6 @@ def _api_browse_dir(path: str = "", kind: str = "", exts=None, mode: str = "") -
         pass
     parent = str(base.parent) if base.parent != base else None
     return {"path": str(base), "parent": parent, "dirs": dossiers, "files": fichiers}
-
-
-def _instance_existante(port: int, timeout: float = 1.0) -> bool:
-    """Vrai si un serveur gpxsolar (et pas un service tiers qui occuperait
-    ce port par coïncidence) répond déjà sur ce port."""
-    import urllib.request
-    try:
-        with urllib.request.urlopen(
-                f"http://{HOTE_GUI}:{port}/api/init", timeout=timeout) as reponse:
-            return json.loads(reponse.read()).get("app") == "gpxsolar"
-    except Exception:
-        return False
-
-
-def _port_libre(port: int) -> bool:
-    """Vrai si ``port`` peut être écouté sur la boucle locale à cet instant."""
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sonde:
-        if os.name != "nt":
-            # Même règle que _serve_web.Server.allow_reuse_address.
-            sonde.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sonde.bind((HOTE_GUI, port))
-        except OSError:
-            return False
-    return True
-
-
-def _premier_port_libre(port_depart: int, gui_dir: Path, api_routes: dict,
-                        post_routes: dict):
-    """Essaie port_depart puis les suivants dans PORT_RANGE_SIZE, retourne
-    (server, port) sur le premier qui accepte, ou (None, None) si toute la
-    plage est prise."""
-    import _serve_web
-    for port in range(port_depart, port_depart + PORT_RANGE_SIZE):
-        try:
-            server = _serve_web.demarrer(
-                bind=HOTE_GUI, port=port, trusted_host="",
-                gui_dir=gui_dir, api_routes=api_routes, post_routes=post_routes,
-                favicon=_fichier_icone(gui_dir),
-            )
-            return server, port
-        except OSError:
-            continue
-    return None, None
 
 
 def _verificateur_de_version():
@@ -5263,9 +5216,10 @@ def _demarrer_nouvelle_instance(*, port_depart, sans_icone=False,
             "here could not be stopped: start it in a terminal with "
             "--serve-gui --new-instance.")}
     popen = popen or subprocess.Popen
-    instance_existante = instance_existante or _instance_existante
+    instance_existante = instance_existante or (
+        lambda p: serveweb.instance_existante("gpxsolar", HOTE_GUI, p))
     port = next((p for p in range(port_depart, port_depart + PORT_RANGE_SIZE)
-                 if _port_libre(p)), None)
+                 if serveweb.port_libre(HOTE_GUI, p)), None)
     if port is None:
         return {"ok": False, "error": (
             f"No free port from {port_depart} to "
@@ -5644,7 +5598,7 @@ def main_serve_gui(args, options):
     api = Api()
 
     def _init_data():
-        # "app" : ce que _instance_existante() interroge pour distinguer « un
+        # "app" : ce que serveweb.instance_existante() interroge pour distinguer « un
         # gpxsolar tourne déjà sur ce port » d'« un service tiers occupe ce
         # port par coïncidence ». "pid" : quel processus répond.
         return {
@@ -5705,7 +5659,8 @@ def main_serve_gui(args, options):
     # nouvelle. Jamais de second serveur démarré en silence.
     gui_dir = _resoudre_gui_dir()
     port_depart = options.port
-    if not options.new_instance and _instance_existante(port_depart):
+    if not options.new_instance and serveweb.instance_existante(
+            "gpxsolar", HOTE_GUI, port_depart):
         url_existante = f"http://{HOTE_GUI}:{port_depart}/"
         nouvelle = False
         interactif = not options.no_browser and _terminal_interactif()
@@ -5729,7 +5684,11 @@ def main_serve_gui(args, options):
             return
         port_depart = options.port + 1
 
-    server, port = _premier_port_libre(port_depart, gui_dir, api_routes, post_routes)
+    import _serve_web
+    server, port = serveweb.premier_port_libre(
+        HOTE_GUI, port_depart, PORT_RANGE_SIZE, trusted_host="",
+        gui_dir=gui_dir, api_routes=api_routes, post_routes=post_routes,
+        favicon=_fichier_icone(gui_dir), handler=_serve_web.Handler)
     if server is None:
         derniere = port_depart + PORT_RANGE_SIZE - 1
         print(f"  Could not listen on {HOTE_GUI}: every port from "
@@ -5907,7 +5866,7 @@ def _preparer_dossiers(args):
               if getattr(sys, "frozen", False) else depart)
     if os.environ.get("GPXSOLAR_CHILD") != "1":
         try:
-            repris = _dossiers.preparer_etat(ancien, version=VERSION)
+            repris = _dossiers.DOSSIERS.preparer_etat(ancien, version=VERSION)
         except (OSError, TimeoutError) as exc:
             logging.warning(f"State migration postponed ({exc}).")
         else:
@@ -5915,7 +5874,7 @@ def _preparer_dossiers(args):
                 logging.info(f"State moved from {ancien} to {DOSSIER_ETAT}: "
                              f"{', '.join(repris)}.")
     DOSSIER_ETAT.mkdir(parents=True, exist_ok=True)
-    sorties = _dossiers.dossier_sorties(DOSSIER_ETAT)
+    sorties = _dossiers.DOSSIERS.dossier_sorties(DOSSIER_ETAT)
     sorties.mkdir(parents=True, exist_ok=True)
     os.chdir(sorties)
 

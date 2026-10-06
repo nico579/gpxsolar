@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """Tests de l'interface web de gpxsolar (depuis la 1.6.0) : le serveur
-_serve_web.py, les fonctions de gpxsolar.py qui l'entourent (instance déjà
-ouverte, port libre, relance, parcours des fichiers) et le pont
-gui/web_bridge.js. Même périmètre que tests/test_serve_web.py chez lidar2map,
-le jumeau, réduit à ce que gpxsolar reprend.
+_serve_web.py (ses réglages pour nico579_commons.serveweb, dont les tests de
+fond sont dans la bibliothèque), les fonctions de gpxsolar.py qui l'entourent
+(instance déjà ouverte, relance, parcours des fichiers) et le pont
+gui/web_bridge.js.
 
 Comme test_gpxsolar.py, on n'importe PAS gpxsolar : son bootstrap
 s'exécuterait au niveau module. Ses fonctions sont extraites du source (ast)
 et exécutées dans un espace de noms contrôlé. _serve_web.py, lui, ne dépend
-que de la bibliothèque standard : on l'importe tel quel.
+que de nico579_commons : on l'importe tel quel.
 
 Exécution : python test_serve_web.py
 """
 import argparse
 import ast
-import http.server
 import json
 import os
 import re
@@ -22,7 +21,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import types
 import unittest
@@ -33,6 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 import _serve_web  # noqa: E402
+from nico579_commons import serveweb  # noqa: E402
 
 SOURCE = (ROOT / "gpxsolar.py").read_text(encoding="utf-8")
 
@@ -74,7 +73,7 @@ def _requete(url, methode="GET", corps=None, entetes=None):
 
 
 class ServeurTests(unittest.TestCase):
-    """_serve_web.py sur un vrai port de la boucle locale."""
+    """Le serveur de gpxsolar (_serve_web.Handler) sur un vrai port de la boucle locale."""
 
     @classmethod
     def setUpClass(cls):
@@ -94,8 +93,8 @@ class ServeurTests(unittest.TestCase):
             cls.recus.append((path, kind, exts, mode))
             return {"ok": True}
 
-        cls.serveur = _serve_web.demarrer(
-            bind="127.0.0.1", port=0, trusted_host="", gui_dir=gui,
+        cls.serveur = serveweb.demarrer(
+            handler=_serve_web.Handler, bind="127.0.0.1", port=0, trusted_host="", gui_dir=gui,
             api_routes={"init": lambda: {"app": "gpxsolar"}, "boom": boom,
                         "browse-dir": parcourir},
             post_routes={"echo": lambda payload: {"recu": payload}},
@@ -108,53 +107,12 @@ class ServeurTests(unittest.TestCase):
         cls.serveur.server_close()
         cls._gui.cleanup()
 
-    def test_page_et_fichiers_servis(self):
-        statut, corps = _requete(self.base + "/")
-        self.assertEqual(statut, 200)
-        self.assertIn(b"page de test", corps)
-        for chemin, attendu in (("/app.js", b"// app"), ("/style.css", b"/* css */"),
-                                ("/web_bridge.js", b"// pont")):
-            self.assertEqual(_requete(self.base + chemin), (200, attendu), chemin)
-
-    def test_icone_de_l_onglet(self):
-        # Comme blink2video : /favicon.ico, gardé une semaine par le navigateur.
-        with urllib.request.urlopen(self.base + "/favicon.ico", timeout=10) as reponse:
-            self.assertEqual(reponse.headers["Content-Type"], "image/x-icon")
-            self.assertEqual(reponse.headers["Cache-Control"], "public, max-age=604800")
-            self.assertEqual(reponse.read(), b"\x00\x00\x01\x00icone")
-
-    def test_route_get_en_json(self):
-        statut, corps = _requete(self.base + "/api/init")
-        self.assertEqual((statut, json.loads(corps)), (200, {"app": "gpxsolar"}))
-
-    def test_routes_inconnues(self):
-        self.assertEqual(_requete(self.base + "/api/absente")[0], 404)
-        self.assertEqual(_requete(self.base + "/autre.html")[0], 404)
-
-    def test_exception_de_route_en_500_json(self):
-        statut, corps = _requete(self.base + "/api/boom")
-        self.assertEqual(statut, 500)
-        self.assertIn("route cassée", json.loads(corps)["error"])
-
-    def test_post_json(self):
-        statut, corps = _requete(self.base + "/api/echo", "POST", b'{"a": 1}',
-                                 {"Content-Type": "application/json"})
-        self.assertEqual((statut, json.loads(corps)), (200, {"recu": {"a": 1}}))
-
-    def test_post_corps_illisible_et_route_inconnue(self):
-        self.assertEqual(_requete(self.base + "/api/echo", "POST", b"{pas du json")[0], 400)
-        self.assertEqual(_requete(self.base + "/api/absente", "POST", b"{}")[0], 404)
-
-    def test_provenances_etrangeres_refusees(self):
-        for entetes in ({"Host": "evil.example"},
-                        {"Origin": "http://evil.example"},
-                        {"Sec-Fetch-Site": "cross-site"}):
-            with self.subTest(entetes=entetes):
-                self.assertEqual(_requete(self.base + "/api/init", entetes=entetes)[0], 403)
-                self.assertEqual(_requete(self.base + "/api/echo", "POST", b"{}",
-                                          entetes)[0], 403)
-        self.assertEqual(_requete(self.base + "/api/init",
-                                  entetes={"Sec-Fetch-Site": "same-origin"})[0], 200)
+    def test_variable_de_proxy_local_est_celle_de_gpxsolar(self):
+        # Le mécanisme (provenance des requêtes, proxy local) est celui de
+        # nico579_commons.serveweb, éprouvé là ; ici, le nom que gpxsolar lui donne.
+        self.assertEqual(_serve_web.Handler.variable_proxy_local,
+                         "GPXSOLAR_TRUSTED_LOOPBACK_PROXY")
+        self.assertTrue(issubclass(_serve_web.Handler, serveweb.Handler))
 
     def test_browse_dir_lit_ses_parametres(self):
         type(self).recus.clear()
@@ -174,7 +132,7 @@ class FonctionsGpxsolarTests(unittest.TestCase):
             for nom in ("a.gpx", "B.GPX", "notes.txt"):
                 (racine / nom).write_text("x", encoding="utf-8")
             ns = _extraire("_api_browse_dir", _dossiers=types.SimpleNamespace(
-                _documents=lambda: racine))
+                DOSSIERS=types.SimpleNamespace(documents=lambda: racine)))
             fichiers = ns["_api_browse_dir"](str(racine), "", [".gpx"], "file")
             self.assertEqual(fichiers["dirs"], ["sous-dossier"])
             self.assertEqual(fichiers["files"], ["a.gpx", "B.GPX"])
@@ -288,37 +246,25 @@ class FonctionsGpxsolarTests(unittest.TestCase):
         self.assertEqual((options.port, options.no_browser, options.no_tray,
                           options.new_instance), (9100, True, True, True))
 
-    def test_instance_existante_ne_reconnait_que_gpxsolar(self):
-        class Repondeur(http.server.BaseHTTPRequestHandler):
-            app = "gpxsolar"
-
-            def do_GET(self):
-                corps = json.dumps({"app": self.app}).encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(corps)))
-                self.end_headers()
-                self.wfile.write(corps)
-
-            def log_message(self, *args):
-                pass
-
-        ns = _extraire("HOTE_GUI", "_instance_existante")
-        existe = ns["_instance_existante"]
-        serveur = http.server.HTTPServer(("127.0.0.1", 0), Repondeur)
-        threading.Thread(target=serveur.serve_forever, daemon=True).start()
-        try:
-            port = serveur.server_address[1]
-            self.assertTrue(existe(port))
-            Repondeur.app = "lidar2map"
-            self.assertFalse(existe(port))
-        finally:
-            serveur.shutdown()
-            serveur.server_close()
-        self.assertFalse(existe(_port_libre()))
+    def test_instance_existante_interroge_le_commun_avec_le_nom_gpxsolar(self):
+        # La reconnaissance d'une instance (route /api/init, champ « app ») est
+        # celle de nico579_commons.serveweb, éprouvée là ; ici, seulement le
+        # nom et l'hôte que gpxsolar lui donne.
+        faux = types.SimpleNamespace(
+            instance_existante=lambda *a: appels.append(a) or True,
+            port_libre=lambda hote, port: True)
+        appels = []
+        resultat = self._nouvelle_instance(
+            serveweb=faux, instance_existante=None,
+            popen=lambda commande, **o: types.SimpleNamespace(poll=lambda: None))
+        self.assertTrue(resultat["ok"])
+        self.assertEqual(appels[0][:2], ("gpxsolar", "127.0.0.1"))
 
     def _nouvelle_instance(self, **options):
-        ns = _extraire("HOTE_GUI", "PORT_RANGE_SIZE", "SCRIPT", "_port_libre",
-                       "_demarrer_nouvelle_instance")
+        espace = {"serveweb": serveweb}
+        espace.update({k: options.pop(k) for k in ("serveweb",) if k in options})
+        ns = _extraire("HOTE_GUI", "PORT_RANGE_SIZE", "SCRIPT",
+                       "_demarrer_nouvelle_instance", **espace)
         return ns["_demarrer_nouvelle_instance"](port_depart=_port_libre(),
                                                  attendre=lambda s: None, **options)
 

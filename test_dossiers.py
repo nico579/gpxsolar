@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import threading
 import types
 import unittest
 from pathlib import Path
@@ -48,9 +47,9 @@ class _Isole(unittest.TestCase):
                      if cle != "GPXSOLAR_HOME"}
         for correctif in (
                 mock.patch.dict(os.environ, sans_home, clear=True),
-                mock.patch.object(_dossiers, "_dossier_etat_standard",
+                mock.patch.object(_dossiers.DOSSIERS, "dossier_etat_standard",
                                   return_value=self.etat),
-                mock.patch.object(_dossiers, "_documents",
+                mock.patch.object(_dossiers.DOSSIERS, "documents",
                                   return_value=self.documents)):
             correctif.start()
             self.addCleanup(correctif.stop)
@@ -59,134 +58,39 @@ class _Isole(unittest.TestCase):
         (self.ancien / nom).write_text(contenu, encoding="utf-8")
 
     def preferences(self):
-        return json.loads((self.etat / _dossiers.PREFERENCES).read_text(encoding="utf-8"))
+        return json.loads((self.etat / _dossiers.DOSSIERS.preferences).read_text(encoding="utf-8"))
 
 
-class DossiersTests(_Isole):
-    def test_etat_dans_le_dossier_standard(self):
-        self.assertEqual(_dossiers.dossier_etat(), self.etat)
+class ConfigurationTests(unittest.TestCase):
+    """Les paramètres propres à gpxsolar. Les règles (calcul des dossiers,
+    reprise unique, repli sans platformdirs) sont celles de
+    nico579_commons.dossiers et y sont éprouvées."""
 
-    def test_sorties_dans_documents_par_defaut(self):
-        self.assertEqual(_dossiers.dossier_sorties(), self.documents / "gpxsolar")
+    def test_noms_et_fichiers_de_gpxsolar(self):
+        d = _dossiers.DOSSIERS
+        self.assertEqual((d.application, d.nom_etat, d.nom_sorties, d.variable_home),
+                         ("gpxsolar", "gpxsolar-data", "gpxsolar", "GPXSOLAR_HOME"))
+        self.assertEqual((d.preferences, d.cle_sorties, d.marqueur),
+                         ("gpx_analyzer_prefs.json", "dossier_sorties",
+                          ".gpxsolar_etat_migre.json"))
+        self.assertEqual(d.fichiers_etat, ("gpx_analyzer_prefs.json",
+                                           "gpx_analyzer_config.json",
+                                           "gpx_analyzer_history.json"))
+        self.assertEqual(d.dossiers_sorties, ("GPX_Ombres", "HGT", "WorldCover",
+                                              "LIDAR_CACHE", "RGEALTI_CACHE"))
 
-    def test_simple_calcul_rien_n_est_cree(self):
-        _dossiers.dossier_etat()
-        _dossiers.dossier_sorties()
-        self.assertFalse(self.etat.exists())
-        self.assertFalse(self.documents.exists())
+    def test_les_fichiers_d_etat_sont_ceux_que_gpxsolar_ecrit(self):
+        source = (ROOT / "gpxsolar.py").read_text(encoding="utf-8")
+        for nom in ("gpx_analyzer_config.json", "gpx_analyzer_history.json"):
+            self.assertIn(nom, source)
+            self.assertIn(nom, _dossiers.DOSSIERS.fichiers_etat)
+        self.assertIn("_dossiers.DOSSIERS.preferences", source)
 
-    def test_gpxsolar_home_regroupe_etat_et_sorties(self):
-        portable = self.racine / "portable"
-        with mock.patch.dict(os.environ, {"GPXSOLAR_HOME": str(portable)}):
-            self.assertEqual(_dossiers.dossier_etat(), portable)
-            self.assertEqual(_dossiers.dossier_sorties(), portable)
-
-    def test_reglage_dossier_sorties_prioritaire(self):
-        self.etat.mkdir(parents=True)
-        randos = self.racine / "D" / "Randos"
-        (self.etat / _dossiers.PREFERENCES).write_text(
-            json.dumps({"lang": "fr", "dossier_sorties": str(randos)}), encoding="utf-8")
-        self.assertEqual(_dossiers.dossier_sorties(), randos)
-
-
-class RepliSansPlatformdirsTests(unittest.TestCase):
-    def test_repli_identique_a_platformdirs(self):
-        # Calcul pur : rien n'est écrit, le vrai dossier peut être comparé.
-        try:
-            import platformdirs  # noqa: F401
-        except ImportError:
-            self.skipTest("platformdirs absent : rien à comparer")
-        reel = _dossiers._dossier_etat_standard()
-        with mock.patch.dict(sys.modules, {"platformdirs": None}):
-            repli = _dossiers._dossier_etat_standard()
-        self.assertEqual(repli, reel)
-        self.assertEqual(reel.name, "gpxsolar-data")
-
-
-class RepriseTests(_Isole):
-    def test_etat_copie_et_sorties_laissees_en_place(self):
-        self.ecrire_ancien("gpx_analyzer_prefs.json", json.dumps({"lang": "fr"}))
-        self.ecrire_ancien("gpx_analyzer_config.json", '{"date": "01/07/2026"}')
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        (self.ancien / "GPX_Ombres").mkdir()
-
-        repris = _dossiers.preparer_etat(self.ancien)
-
-        self.assertEqual(repris, ["gpx_analyzer_prefs.json", "gpx_analyzer_config.json",
-                                  "gpx_analyzer_history.json", "dossier_sorties"])
-        self.assertEqual(self.preferences(),
-                         {"lang": "fr", "dossier_sorties": str(self.ancien)})
-        self.assertEqual((self.etat / "gpx_analyzer_config.json").read_text(encoding="utf-8"),
-                         '{"date": "01/07/2026"}')
-        self.assertEqual(_dossiers.dossier_sorties(), self.ancien)
-        # Copiés, jamais déplacés : revenir à la 1.3 reste possible.
-        for nom in _dossiers.FICHIERS_ETAT:
-            self.assertTrue((self.ancien / nom).is_file(), nom)
-        self.assertTrue((self.ancien / "GPX_Ombres").is_dir())
-        marqueur = json.loads((self.etat / _dossiers.MARQUEUR).read_text(encoding="utf-8"))
-        self.assertEqual(marqueur["depuis"], str(self.ancien))
-        self.assertEqual(marqueur["dossier_sorties"], str(self.ancien))
-
-    def test_une_seule_reprise(self):
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        self.assertEqual(_dossiers.preparer_etat(self.ancien), ["gpx_analyzer_history.json"])
-        self.ecrire_ancien("gpx_analyzer_config.json", "{}")
-        self.assertEqual(_dossiers.preparer_etat(self.ancien), [])
-        self.assertFalse((self.etat / "gpx_analyzer_config.json").exists())
-
-    def test_rien_a_reprendre_ni_marqueur_ni_reglage(self):
-        self.assertEqual(_dossiers.preparer_etat(self.ancien), [])
-        self.assertFalse((self.etat / _dossiers.MARQUEUR).exists())
-        self.assertFalse((self.etat / _dossiers.PREFERENCES).exists())
-        # Sans marqueur, la version installée pourra encore reprendre.
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        self.assertEqual(_dossiers.preparer_etat(self.ancien), ["gpx_analyzer_history.json"])
-
-    def test_n_ecrase_jamais_l_etat_ni_le_reglage_existants(self):
-        self.etat.mkdir(parents=True)
-        (self.etat / "gpx_analyzer_history.json").write_text("[1]", encoding="utf-8")
-        (self.etat / _dossiers.PREFERENCES).write_text(
-            json.dumps({"dossier_sorties": "D:/Randos"}), encoding="utf-8")
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        self.ecrire_ancien("gpx_analyzer_prefs.json", "{}")
-        (self.ancien / "HGT").mkdir()
-
-        self.assertEqual(_dossiers.preparer_etat(self.ancien), [])
-        self.assertEqual((self.etat / "gpx_analyzer_history.json").read_text(encoding="utf-8"),
-                         "[1]")
-        self.assertEqual(self.preferences(), {"dossier_sorties": "D:/Randos"})
-
-    def test_sans_effet_avec_gpxsolar_home(self):
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        with mock.patch.dict(os.environ, {"GPXSOLAR_HOME": str(self.racine / "portable")}):
-            self.assertEqual(_dossiers.preparer_etat(self.ancien), [])
-        self.assertFalse(self.etat.exists())
-
-    def test_ancien_dossier_deja_dossier_d_etat(self):
-        self.etat.mkdir(parents=True)
-        (self.etat / "gpx_analyzer_history.json").write_text("[]", encoding="utf-8")
-        self.assertEqual(_dossiers.preparer_etat(self.etat), [])
-        self.assertFalse((self.etat / _dossiers.MARQUEUR).exists())
-
-    def test_lancements_simultanes_une_seule_reprise(self):
-        # Deux lancements au même instant : le verrou exclut aussi deux fils
-        # d'un même processus.
-        self.ecrire_ancien("gpx_analyzer_history.json", "[]")
-        (self.ancien / "GPX_Ombres").mkdir()
-        resultats = []
-        depart = threading.Barrier(4)
-
-        def lancer():
-            depart.wait()
-            resultats.append(_dossiers.preparer_etat(self.ancien))
-
-        fils = [threading.Thread(target=lancer) for _ in range(4)]
-        for f in fils:
-            f.start()
-        for f in fils:
-            f.join()
-        self.assertEqual(sorted(bool(r) for r in resultats), [False, False, False, True])
-        self.assertEqual(self.preferences(), {"dossier_sorties": str(self.ancien)})
+    def test_la_copie_locale_de_la_logique_n_existe_plus(self):
+        for nom in ("dossier_etat", "dossier_sorties", "preparer_etat", "_documents",
+                    "_dossier_etat_standard", "_force", "_reprendre"):
+            self.assertFalse(hasattr(_dossiers, nom), nom)
+        self.assertFalse((ROOT / "_atomic_files.py").exists())
 
 
 def _preparer_dossiers_de_gpxsolar(etat):
@@ -244,7 +148,7 @@ class PreparerDossiersTests(_Isole):
         self.preparer(self.arguments())
         self.assertEqual(Path.cwd(), self.documents / "gpxsolar")
         self.assertTrue(self.etat.is_dir())
-        self.assertFalse((self.etat / _dossiers.MARQUEUR).exists())
+        self.assertFalse((self.etat / _dossiers.DOSSIERS.marqueur).exists())
 
     def test_sous_processus_de_l_interface_ne_reprend_rien(self):
         self.ecrire_ancien("gpx_analyzer_history.json", "[]")
