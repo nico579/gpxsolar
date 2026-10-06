@@ -65,7 +65,7 @@ Two ways to use gpxsolar:
 |---|---|---|
 | **Requirements** | Python 3.12 | None |
 | **First install** | ~5 min (deps bootstrap) | None |
-| **Updates** | `git pull` + relaunch | Download the new release and extract it over the previous one |
+| **Updates** | `git pull` + relaunch | Installs itself: the page and the tray menu offer "Install", the program is replaced and restarted, the previous version comes back if the new one does not start |
 | **Distributable** | No — each user installs Python | Yes: the extracted folder, or `GPXSOLAR.app`, is the whole application |
 | **Best for** | dev / Linux / contributing | end user / distributing |
 
@@ -250,8 +250,11 @@ Interface mode options: `--serve-gui` followed by `--port N` (starting port,
 `gpxsolar --serve-gui --help`.
 
 While it runs, its tray icon offers the same menu as the author's other apps:
-Open, "Update to x.y" when a newer version is published (it opens that
-release's page), Restart, Stop, and "Create a Desktop shortcut".
+Open, "Update to x.y" when a newer version is published (it downloads it,
+checks its SHA-256, replaces the program and restarts it; if the installation
+cannot replace itself, for instance when run from the sources, it opens the
+release's page), Restart, Stop, and "Create a Desktop shortcut". The web page
+shows the same offer in a banner at the top, with the download progress.
 
 ### Command-line mode (headless)
 
