@@ -113,7 +113,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.8.1"
+VERSION      = "1.9.0"
 VERSION_DATE = "2026-09"
 
 
@@ -5064,14 +5064,72 @@ def _verificateur_de_version():
     return maj.Verificateur("nico579/gpxsolar", VERSION)
 
 
-def _actions_tray(url: str, gui_dir: Path, arreter, verificateur):
+def _application_installation():
+    """Ce que nico579_commons.maj_install doit savoir de gpxsolar : ses données
+    vivent hors du dossier d'installation (GPXSOLAR_HOME, dossier de données de
+    l'utilisateur), rien à recopier d'une version à l'autre ; relancée sans
+    argument, la nouvelle version rouvre l'interface."""
+    from nico579_commons import maj_install
+    return maj_install.Application("gpxsolar", fenetre="Minimized")
+
+
+def _disposition_installation():
+    """Où gpxsolar est installé et comment s'appelle son archive pour ce
+    système (convention commune de gpxsolar et lidar2map) ; refuse
+    (ErreurMiseAJour) depuis les sources et tout dossier qui n'est pas le
+    bundle publié."""
+    from nico579_commons import maj_install
+    fichier, genre, racine = maj_install.archive_standard(
+        "gpxsolar", racine_macos="GPXSOLAR.app")
+    return maj_install.disposition(
+        _application_installation(), asset_name=fichier, archive_kind=genre,
+        racine_attendue=racine)
+
+
+def _installateur(verificateur, quitter):
+    """L'installation automatique d'une version plus récente, conduite en fond
+    (nico579_commons.maj_install) : le menu de l'icône et la page lisent son
+    état et la démarrent."""
+    from nico579_commons import maj_install
+    return maj_install.Installateur(
+        _application_installation(), "nico579/gpxsolar", verificateur,
+        _disposition_installation, quitter=quitter)
+
+
+def _auto_test_version(argv) -> int:
+    """« gpxsolar --self-test-version X » : la mise à jour automatique fait
+    passer ce contrôle au bundle qu'elle vient de télécharger, avant de
+    remplacer quoi que ce soit. Vrai (0) si ce programme est bien la version X
+    et que de quoi s'installer et servir l'interface est présent."""
+    try:
+        attendue = argv[argv.index("--self-test-version") + 1].lstrip("vV")
+    except (ValueError, IndexError):
+        print("--self-test-version attend une version.")
+        return 2
+    try:
+        from nico579_commons import maj_install, serveweb  # noqa: F401
+        _resoudre_gui_dir()
+    except Exception as exc:
+        print(f"auto-test : {type(exc).__name__}: {exc}")
+        return 1
+    if VERSION != attendue:
+        print(f"auto-test : version {VERSION}, attendue {attendue}")
+        return 1
+    print(f"gpxsolar {VERSION}")
+    return 0
+
+
+def _actions_tray(url: str, gui_dir: Path, arreter, verificateur, installateur=None):
     """Ce que gpxsolar donne au menu de l'icône, le même dans les quatre
     applications (nico579_commons.tray) : Ouvrir, « Mettre à jour vers
-    x.y » quand une version plus récente est publiée (ouvre la page de la
-    release, gpxsolar ne s'installe pas lui-même), Redémarrer, Arrêter,
-    Créer un raccourci sur le Bureau. Tout le reste passe par la page.
+    x.y » quand une version plus récente est publiée (elle s'installe
+    toute seule quand l'installation s'y prête, sinon ouvre la page de la
+    release), Redémarrer, Arrêter, Créer un raccourci sur le Bureau. Tout le
+    reste passe par la page.
 
-    ``arreter`` : arrête le calcul en cours et libère le port."""
+    ``arreter`` : arrête le calcul en cours et libère le port.
+    ``installateur`` : celui de _installateur(), qui lève lui-même l'arrêt de
+    l'icône quand la nouvelle version est prête à prendre la place."""
     import webbrowser
     from nico579_commons import relance
     from nico579_commons import tray as apptray
@@ -5084,6 +5142,9 @@ def _actions_tray(url: str, gui_dir: Path, arreter, verificateur):
         relance.relancer(relance.commande(), nom="gpxsolar", cwd=os.getcwd())
 
     def _mettre_a_jour():
+        if installateur is not None and installateur.possible()[0]:
+            installateur.demarrer()
+            return
         info = verificateur.disponible()
         webbrowser.open(info["page"] if info else verificateur.page_des_releases)
 
@@ -5636,12 +5697,29 @@ def main_serve_gui(args, options):
             port_depart=etat_serveur["port"] + 1,
             sans_icone=options.no_tray or etat_serveur.get("sans_icone", False))
 
+    # Vérificateur créé même sans icône : il importe nico579_commons, dont
+    # l'absence dans un binaire fait ainsi échouer le smoke (--no-tray).
+    verificateur = _verificateur_de_version()
+    arret_demande = threading.Event()
+    etat_icone = {"tray": None}
+
+    def _quitter_pour_la_mise_a_jour():
+        """La nouvelle version est prête : l'assistant attend notre fin."""
+        arret_demande.set()
+        if etat_icone["tray"] is not None:
+            etat_icone["tray"].arret.set()
+
+    installateur = _installateur(verificateur, _quitter_pour_la_mise_a_jour)
+    from nico579_commons import maj_install
+    routes_maj_get, routes_maj_post = maj_install.routes(installateur, _langue_console)
+
     api_routes = {
         "init": _init_data,
         "historique": api.get_historique,
         "last-error": api.get_last_error,
         "poll-log": api.poll_log,
         "browse-dir": _api_browse_dir,
+        **routes_maj_get,
     }
     post_routes = {
         "launch": _launch,
@@ -5649,6 +5727,7 @@ def main_serve_gui(args, options):
         "clear-historique": lambda _payload: api.clear_historique(),
         "set-lang": _set_lang,
         "new-instance": _new_instance,
+        **routes_maj_post,
     }
 
     # Un gpxsolar tourne peut-être déjà sur le port de départ : un second
@@ -5720,14 +5799,13 @@ def main_serve_gui(args, options):
     # garantie qu'un Ctrl+C interrompe proprement la boucle native de
     # pystray selon l'OS, contrairement à time.sleep() ci-dessous - deux
     # chemins complets et séparés plutôt qu'un mélange fragile des deux).
-    # Vérificateur créé même sans icône : il importe nico579_commons, dont
-    # l'absence dans un binaire fait ainsi échouer le smoke (--no-tray).
-    verificateur = _verificateur_de_version()
     tray = None
     if not options.no_tray:
         try:
             tray = _construire_tray_icon(gui_dir, _actions_tray(
-                url, gui_dir, _arreter_le_calcul_et_le_serveur, verificateur))
+                url, gui_dir, _arreter_le_calcul_et_le_serveur, verificateur,
+                installateur))
+            etat_icone["tray"] = tray
         except Exception as exc:
             # Linux sans affichage (SSH, session sans bureau) : pystray tente
             # une connexion X dès l'import et lève. Le serveur tournait déjà :
@@ -5739,12 +5817,14 @@ def main_serve_gui(args, options):
     if tray is None:
         print("  Ctrl+C to stop.")
         try:
-            while True:
-                time.sleep(3600)
+            # Attend aussi la fin demandée par une mise à jour installée.
+            while not arret_demande.wait(3600):
+                pass
         except KeyboardInterrupt:
-            _arreter_le_calcul_et_le_serveur()
-            print("\n  Web GUI server stopped.")
-            sys.exit(0)
+            pass
+        _arreter_le_calcul_et_le_serveur()
+        print("\n  Web GUI server stopped.")
+        sys.exit(0)
 
     verificateur.veiller(tray.arret)
     print("  Look for the gpxsolar icon in the system tray.")
@@ -5880,6 +5960,8 @@ def _preparer_dossiers(args):
 
 
 def main():
+    if "--self-test-version" in sys.argv[1:]:
+        sys.exit(_auto_test_version(sys.argv[1:]))
     # Types argparse « bornés » : le pattern standard pour valider des valeurs
     # numériques à l'entrée (une fonction type= qui lève ArgumentTypeError).
     # Sans eux : --solar-step-s 0 = division par zéro, --batch-size 0 =

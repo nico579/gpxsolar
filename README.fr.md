@@ -66,7 +66,7 @@ Deux façons d'utiliser gpxsolar :
 |---|---|---|
 | **Prérequis** | Python 3.12 | Aucun |
 | **Première install** | ~5 min (bootstrap deps) | Aucun |
-| **Mises à jour** | `git pull` + relance | Télécharger la nouvelle release et la décompresser par-dessus la précédente |
+| **Mises à jour** | `git pull` + relance | Elle s'installe seule : la page et le menu de l'icône proposent « Installer », le programme est remplacé puis relancé, et l'ancienne version revient si la nouvelle ne démarre pas |
 | **Distribuable** | Non — chaque utilisateur installe Python | Oui : le dossier extrait, ou `GPXSOLAR.app`, est l'application entière |
 | **Idéal pour** | dev / Linux / contribuer | utilisateur final / distribuer |
 
@@ -255,8 +255,12 @@ ou `--new-instance` ; voir `gpxsolar --serve-gui --help`.
 
 Pendant qu'il tourne, son icône de la zone de notification propose le même
 menu que les autres applications de l'auteur : Ouvrir, « Mettre à jour vers
-x.y » quand une version plus récente est publiée (ouvre la page de cette
-version), Redémarrer, Arrêter, et « Créer un raccourci sur le Bureau ».
+x.y » quand une version plus récente est publiée (elle la télécharge, vérifie
+son SHA-256, remplace le programme et le relance ; si l'installation ne peut pas
+se remplacer elle-même, par exemple depuis les sources, elle ouvre la page de
+cette version), Redémarrer, Arrêter, et « Créer un raccourci sur le Bureau ». La
+page web affiche la même proposition dans un bandeau en haut, avec
+l'avancement du téléchargement.
 
 ### Mode ligne de commande (headless)
 

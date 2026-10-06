@@ -19,7 +19,9 @@ tests/exe_smoke.py de lidar2map :
      page, ses fichiers et le journal sont servis. Depuis la 1.6.0, qui a
      remplacé la fenêtre Qt par ce serveur, l'interface est enfin à portée
      d'un runner sans écran ;
-  4. rien n'est écrit à côté du binaire, ni par l'un ni par l'autre.
+  4. rien n'est écrit à côté du binaire, ni par l'un ni par l'autre ;
+  5. l'auto-test de la mise à jour automatique : « --self-test-version X »
+     réussit pour sa propre version et échoue pour une autre.
 
 Appelé par release.yml après « Package » sur chaque runner, et utilisable
 en local :
@@ -242,6 +244,27 @@ def smoke(archive: Path, racine: Path) -> None:
         raise Echec(f"--version : code {resultat.returncode}, attendu "
                     f"« gpxsolar {attendue} »\n{sortie[-3000:]}")
     print(f"   OK : gpxsolar {attendue}", flush=True)
+
+    print("\n== 1b. auto-test de la mise à jour automatique (--self-test-version)", flush=True)
+    try:
+        resultat = subprocess.run(
+            [str(programme), "--self-test-version", attendue], env=env, cwd=racine,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            errors="replace", timeout=DELAI_DEMARRAGE_S,
+        )
+    except subprocess.TimeoutExpired:
+        raise Echec(f"--self-test-version sans réponse après {DELAI_DEMARRAGE_S} s") from None
+    sortie = (resultat.stdout or "") + (resultat.stderr or "")
+    if resultat.returncode != 0:
+        raise Echec(f"--self-test-version {attendue} : code {resultat.returncode}\n{sortie[-3000:]}")
+    mauvaise = "0.0.0-erronee"
+    refus = subprocess.run(
+        [str(programme), "--self-test-version", mauvaise], env=env, cwd=racine,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
+        timeout=DELAI_DEMARRAGE_S)
+    if refus.returncode == 0:
+        raise Echec("--self-test-version accepte une version qui n'est pas la sienne")
+    print("   OK : accepte sa version, refuse une autre", flush=True)
 
     print("\n== 2. ménage de ce que laissaient un lanceur <= 1.4 et la 1.5.0", flush=True)
     encore = [str(chemin) for chemin in restes + restes_qt if chemin.exists()]
