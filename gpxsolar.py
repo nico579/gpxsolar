@@ -17,11 +17,13 @@ Usage :
     python gpxsolar.py --serve-gui --help   # options de l'interface
     python gpxsolar.py --help         # options CLI
 
-Bootstrap des dépendances (style lidar2map), depuis le verrou requirements.txt
-(versions exactes, empreintes SHA-256) :
+Bootstrap des dépendances (_amorcage.py, commun aux quatre applications),
+depuis le verrou requirements.txt (versions exactes, empreintes SHA-256) :
     --bootstrap=auto   (défaut) : venv automatique dans ~/.gpxsolar, remis au
                                   verrou quand une nouvelle version en apporte
                                   un autre
+    --bootstrap=force          : idem, même si un environnement conda ou venv
+                                  est déjà actif
     --bootstrap=pip            : install du verrou dans l'env Python courant,
                                   quitte à changer la version de paquets déjà
                                   installés dans cet env
@@ -40,7 +42,6 @@ import os
 import time
 import contextlib
 import platform
-import importlib.util
 import logging
 from pathlib import Path
 
@@ -113,298 +114,24 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.9.1"
+VERSION      = "1.10.0"
 VERSION_DATE = "2026-09"
 
 
 # Dépendances : déclarées une seule fois, dans requirements.in, et installées
 # depuis le verrou requirements.txt (versions exactes, empreintes SHA-256,
 # Windows, macOS et Linux), par le mode sources comme par la construction du
-# programme et la CI. Les aides qui les lisent sont dans _installation.py.
-# Jusqu'à la 1.7, deux listes codées en dur ici, deux autres dans la CI, et
+# programme et la CI. Le moteur (modes auto, force, pip et none, venv, relance,
+# --installer-deps) est _amorcage.py, copie octet pour octet de
+# nico579_commons.amorcage : il tourne avant l'installation de la bibliothèque
+# commune, qu'il ne peut donc pas importer. test_amorcage_commun.py compare les
+# deux. Jusqu'à la 1.7, deux listes codées en dur ici, deux autres dans la CI, et
 # rien de figé : deux constructions du même commit n'embarquaient pas les
 # mêmes bibliothèques.
+import _amorcage
 
-
-def _resoudre_mode_bootstrap():
-    """Détermine le mode de bootstrap (auto|pip|none|force) et nettoie sys.argv.
-
-    Modes :
-      auto  : crée un venv ~/.gpxsolar/venv si une dépendance critique manque.
-              Si toutes les dépendances sont déjà importables, ne touche à rien.
-      force : crée TOUJOURS le venv (utile pour isoler une install ou debug).
-      pip   : install directe dans le Python courant (sans venv).
-      none  : pas d'install ; vérifie les imports et plante si manquants.
-
-    Priorité (du plus faible au plus fort) :
-      1. Défaut          : "auto"
-      2. Variable d'env  : GPXSOLAR_BOOTSTRAP={auto|pip|none|force}
-      3. Argument CLI    : --bootstrap={auto|pip|none|force}
-    """
-    mode = "auto"
-    valid = ("auto", "pip", "none", "force")
-
-    env_mode = os.environ.get("GPXSOLAR_BOOTSTRAP", "").lower().strip()
-    if env_mode in valid:
-        mode = env_mode
-
-    to_remove = []
-    for i, arg in enumerate(sys.argv):
-        if arg.startswith("--bootstrap="):
-            v = arg.split("=", 1)[1].lower().strip()
-            if v in valid:
-                mode = v
-            to_remove.append(i)
-        elif arg == "--bootstrap" and i + 1 < len(sys.argv):
-            v = sys.argv[i + 1].lower().strip()
-            if v in valid:
-                mode = v
-            to_remove.append(i); to_remove.append(i + 1)
-
-    if "--help-bootstrap" in sys.argv:
-        print(__doc__)
-        sys.exit(0)
-
-    for i in sorted(to_remove, reverse=True):
-        if i < len(sys.argv):
-            del sys.argv[i]
-    return mode
-
-
-def _afficher_erreur_deps(manquantes, hint=""):
-    print()
-    print("  ╔══════════════════════════════════════════════════════════════╗")
-    print("  ║  ERROR: missing critical Python packages".ljust(63) + " ║")
-    print("  ╚══════════════════════════════════════════════════════════════╝")
-    print(f"  Missing: {', '.join(manquantes)}")
-    if hint:
-        print(f"  {hint}")
-    print()
-    print("  Solutions:")
-    print("    1. Let gpxsolar create its own isolated environment (recommended):")
-    print("       python gpxsolar.py --bootstrap=auto")
-    print("    2. Install the lock into a venv of your own, then relaunch with")
-    print("       --bootstrap=none:")
-    print(f"       pip install -r {_installation.VERROU}")
-    print()
-
-
-def _installer_verrou(python_exe, *options):
-    """pip install du verrou requirements.txt (empreintes vérifiées) avec
-    ``python_exe``. Retourne (ok, fin du message d'erreur de pip)."""
-    commande = _installation.commande_installation(python_exe, *options)
-    try:
-        r = subprocess.run(commande, capture_output=True, text=True, timeout=1800)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return False, str(e)
-    if r.returncode == 0:
-        return True, ""
-    stderr = (r.stderr or r.stdout or "").strip()
-    return False, "\n  ".join(stderr.split("\n")[-3:])
-
-
-def _bootstrap_venv_auto(force: bool = False):
-    """Crée (si nécessaire) un venv ~/.gpxsolar/venv, y installe le verrou
-    requirements.txt et y relance le script. Un venv installé depuis un autre
-    verrou (nouvelle version de gpxsolar) est remis aux nouvelles versions,
-    sans être recréé.
-
-    Args:
-        force : si True, crée TOUJOURS le venv même si les dépendances sont
-                déjà installées dans le Python courant. Sinon (mode 'auto'),
-                on saute la création quand tout est déjà en place.
-    """
-    is_windows = platform.system() == "Windows"
-    home_dir   = Path.home() / ".gpxsolar"
-    venv_path  = home_dir / "venv"
-
-    # Déjà dans CE venv ? (ré-entrée après exec)
-    try:
-        if Path(sys.prefix).resolve() == venv_path.resolve():
-            print(f"  [bootstrap] inside venv {venv_path}")
-            return
-    except OSError:
-        pass
-
-    manquantes = _installation.dependances_absentes(_installation.dependances_directes())
-    if not manquantes and not force:
-        # Toutes les déps déjà installées : pas besoin de venv. Mais on l'annonce
-        # pour que l'utilisateur ne s'attende pas à voir un venv apparaître.
-        print(f"  [bootstrap] dependencies already available in {sys.executable}")
-        print("             venv not created - use --bootstrap=force to force creation")
-        return
-
-    venv_bin  = venv_path / ("Scripts" if is_windows else "bin")
-    venv_py   = venv_bin / ("python.exe" if is_windows else "python")
-    marque    = venv_path / _installation.MARQUE_VERROU
-    empreinte = _installation.empreinte_verrou()
-
-    # Venv installé depuis ce même verrou : relancer dedans
-    try:
-        a_jour = venv_py.exists() and marque.read_text().strip() == empreinte
-    except OSError:
-        a_jour = False
-    if a_jour:
-        print(f"  Relaunching in venv: {venv_path}")
-        _relancer(venv_py, is_windows)
-        return  # _relancer ne revient pas (exec sur Unix, exit sous Windows)
-
-    if not venv_py.exists():
-        suppr = ("rmdir /s /q %USERPROFILE%\\.gpxsolar" if is_windows
-                 else "rm -rf ~/.gpxsolar")
-        print()
-        print("  ╔══════════════════════════════════════════════════════════════╗")
-        print("  ║  First launch - creating an isolated venv for gpxsolar".ljust(63) + " ║")
-        print("  ║  (~80 MB once installed). No impact on system Python.".ljust(63) + " ║")
-        print(f"  ║  To remove it: {suppr}".ljust(63) + " ║")
-        print("  ║  To use a direct install (no venv):".ljust(63) + " ║")
-        print("  ║    python gpxsolar.py --bootstrap=pip                        ║")
-        print("  ╚══════════════════════════════════════════════════════════════╝")
-        print(f"  Creating venv {venv_path}...")
-        try:
-            subprocess.run([sys.executable, "-m", "venv", str(venv_path)],
-                           check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR creating venv: {e}")
-            print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
-            sys.exit(1)
-
-    # Toutes les dépendances d'un coup, aux versions exactes du verrou, dont
-    # pip vérifie les empreintes.
-    print("  Installing dependencies in the venv (3-5 min)...")
-    ok, err = _installer_verrou(venv_py)
-    if not ok:
-        print(f"  ERROR installing the dependencies in the venv:\n  {err}")
-        print("  Check your internet connection, then try:")
-        print("    " + subprocess.list2cmdline(_installation.commande_installation(venv_py)))
-        sys.exit(1)
-    marque.write_text(empreinte + "\n")
-    print("  ✓ Dependencies installed.")
-    print("  Relaunching in venv...")
-    _relancer(venv_py, is_windows)
-
-
-def _relancer(venv_python, is_windows):
-    """Relance le script avec le Python du venv (exec sur Unix, run sur Windows)."""
-    if is_windows:
-        try:
-            sys.stdout.flush(); sys.stderr.flush()
-            r = subprocess.run([str(venv_python)] + sys.argv,
-                               stdout=sys.stdout, stderr=sys.stderr,
-                               stdin=sys.stdin)
-            sys.exit(r.returncode)
-        except KeyboardInterrupt:
-            sys.exit(130)
-    else:
-        os.execv(str(venv_python), [str(venv_python)] + sys.argv)
-
-
-def _bootstrap_pip_courant():
-    """Mode --bootstrap=pip : installe le verrou requirements.txt dans le
-    Python courant (sans venv), quitte à changer la version de paquets déjà
-    installés. Stratégie 3 niveaux : standard → --break-system-packages →
-    --user (dans un venv, seule la première a un sens).
-    """
-    manquantes = _installation.dependances_absentes(_installation.dependances_directes())
-    if not manquantes:
-        return
-
-    in_venv = (hasattr(sys, "real_prefix") or
-               (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix))
-    if in_venv:
-        strategies = [((), "standard (venv)")]
-    else:
-        strategies = [
-            ((), "standard"),
-            (("--break-system-packages",), "--break-system-packages (PEP 668)"),
-            (("--user",), "--user"),
-        ]
-
-    print(f"  Installing dependencies: {', '.join(manquantes)}...")
-    last_err = ""
-    for options, label in strategies:
-        ok, err = _installer_verrou(sys.executable, *options)
-        if ok:
-            importlib.invalidate_caches()
-            print(f"  ✓ Installation OK ({label})")
-            return
-        last_err = f"{label}: {err}"
-
-    _afficher_erreur_deps(manquantes,
-                          hint=f"Dernier message pip : {last_err}" if last_err else "")
-    sys.exit(1)
-
-
-def _installer_deps_et_quitter():
-    """--installer-deps : crée ~/.gpxsolar/venv, y installe le verrou complet
-    (requirements.txt) puis quitte SANS lancer la GUI.
-
-    Appelé par les scripts setup_build_* (équivalent du --installer-deps de
-    lidar2map). Le venv ainsi équipé sert ensuite à PyInstaller pour le build.
-    """
-    is_windows = platform.system() == "Windows"
-    venv_path  = Path.home() / ".gpxsolar" / "venv"
-    venv_bin   = venv_path / ("Scripts" if is_windows else "bin")
-    venv_py    = venv_bin / ("python.exe" if is_windows else "python")
-
-    if not venv_py.exists():
-        print(f"  Creating venv {venv_path}...")
-        try:
-            subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True)
-        except subprocess.CalledProcessError as e:
-            print(f"  ERROR creating venv: {e}")
-            print("  Install Python 3.9+ with the venv module (apt install python3-venv).")
-            sys.exit(1)
-
-    print(f"  Installing dependencies in {venv_path} (3-5 min)...")
-    ok, err = _installer_verrou(venv_py)
-    if not ok:
-        print(f"  ERROR installing the dependencies:\n  {err}")
-        sys.exit(1)
-    (venv_path / _installation.MARQUE_VERROU).write_text(
-        _installation.empreinte_verrou() + "\n")
-    print(f"  ✓ Dependencies installed in {venv_path}")
-    sys.exit(0)
-
-
-def _bootstrap_environnement():
-    """Orchestrateur unique du démarrage : choisit le mode et applique."""
-    # En mode binaire PyInstaller, les dépendances sont déjà bundlées dans
-    # l'exécutable — toute tentative d'install via pip échouerait (sys.executable
-    # pointe vers le binaire, pas vers un python utilisable). On consomme quand
-    # même les flags --bootstrap=* dans sys.argv pour qu'argparse ne plante pas.
-    if getattr(sys, "frozen", False):
-        _resoudre_mode_bootstrap()  # uniquement pour nettoyer sys.argv
-        if "--installer-deps" in sys.argv:
-            sys.argv.remove("--installer-deps")  # no-op en frozen (deps bundlées)
-        print("  [bootstrap] mode=frozen (PyInstaller binary) — bootstrap skipped")
-        return
-
-    # --installer-deps : install dédiée pour les scripts de build, puis exit.
-    if "--installer-deps" in sys.argv:
-        _resoudre_mode_bootstrap()  # nettoie d'éventuels --bootstrap=*
-        _installer_deps_et_quitter()
-
-    mode = _resoudre_mode_bootstrap()
-    print(f"  [bootstrap] mode={mode} python={sys.executable}")
-    if mode == "none":
-        manquantes = _installation.dependances_absentes(_installation.dependances_directes())
-        if manquantes:
-            _afficher_erreur_deps(manquantes, hint="Mode --bootstrap=none actif.")
-            sys.exit(1)
-        print("  [bootstrap] all dependencies are installed")
-        return
-    if mode == "pip":
-        _bootstrap_pip_courant()
-        return
-    if mode == "force":
-        _bootstrap_venv_auto(force=True)
-        return
-    # mode == "auto"
-    _bootstrap_venv_auto(force=False)
-
-
-_bootstrap_environnement()
+_amorcage.Amorcage("gpxsolar", Path(__file__).resolve().parent,
+                   reutiliser_environnement=True).lancer()
 
 # Configuration logging par défaut (peut être surchargée par main()).
 # Sans cette config initiale, les logs émis pendant l'import (monkeypatch
