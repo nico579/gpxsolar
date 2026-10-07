@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.11.0"
+VERSION      = "1.11.1"
 VERSION_DATE = "2026-09"
 
 
@@ -4786,9 +4786,11 @@ def _api_browse_dir(path: str = "", kind: str = "", exts=None, mode: str = "") -
 def _verificateur_de_version():
     """Dernière release publiée de gpxsolar, demandée à GitHub au plus une
     fois par heure par un fil de fond (nico579_commons.maj) : le menu de
-    l'icône la lit sans jamais attendre le réseau."""
+    l'icône la lit sans jamais attendre le réseau. Dernière réponse de GitHub gardée dans le dossier d'état : un redémarrage ne repose pas la
+    question tant qu'elle a moins d'une heure (nico579_commons.maj.Verificateur.veiller)."""
     from nico579_commons import maj
-    return maj.Verificateur("nico579/gpxsolar", VERSION)
+    return maj.Verificateur("nico579/gpxsolar", VERSION,
+                            cache=_dossiers.DOSSIERS.dossier_etat() / "maj.json")
 
 
 def _application_installation():
