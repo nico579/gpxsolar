@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.11.1"
+VERSION      = "1.12.0"
 VERSION_DATE = "2026-09"
 
 
@@ -4798,8 +4798,11 @@ def _application_installation():
     vivent hors du dossier d'installation (GPXSOLAR_HOME, dossier de données de
     l'utilisateur), rien à recopier d'une version à l'autre ; la nouvelle
     version repart avec les mêmes arguments que ce lancement (port...)."""
+    import _autostart
     from nico579_commons import maj_install
     return maj_install.Application("gpxsolar", arguments_relance=tuple(sys.argv[1:]),
+                                   unite_systemd=_autostart.LINUX_SERVICE_NAME,
+                                   label_launchd=_autostart.MAC_LABEL,
                                    fenetre="Minimized")
 
 
@@ -5448,6 +5451,11 @@ def main_serve_gui(args, options):
     installateur = _installateur(verificateur, _quitter_pour_la_mise_a_jour)
     from nico579_commons import maj_install
     routes_maj_get, routes_maj_post = maj_install.routes(installateur, _langue_console)
+    # La case « Démarrer automatiquement avec le système » est celle du commun
+    # (/api/autostart, dessinée par reglages.js dans le panneau Réglages).
+    import _autostart
+    from nico579_commons import demarrage
+    routes_demarrage_get, routes_demarrage_post = demarrage.routes(_autostart.entree, _langue_console)
 
     api_routes = {
         "init": _init_data,
@@ -5456,6 +5464,7 @@ def main_serve_gui(args, options):
         "poll-log": api.poll_log,
         "browse-dir": _api_browse_dir,
         **routes_maj_get,
+        **routes_demarrage_get,
     }
     post_routes = {
         "launch": _launch,
@@ -5464,6 +5473,7 @@ def main_serve_gui(args, options):
         "set-lang": _set_lang,
         "new-instance": _new_instance,
         **routes_maj_post,
+        **routes_demarrage_post,
     }
 
     # Un gpxsolar tourne peut-être déjà sur le port de départ : un second

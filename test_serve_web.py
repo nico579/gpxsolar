@@ -344,5 +344,37 @@ class PontJsTests(unittest.TestCase):
         self.assertIn("browse-dir", routes_serveur)
 
 
+class CaseDemarrageAutomatique(unittest.TestCase):
+    """La case « Démarrer automatiquement avec le système » du panneau Réglages : celle du
+    commun (nico579_commons.demarrage.routes, testée chez lui), branchée sur l'entrée de
+    gpxsolar. Jamais le vrai dossier Démarrage : seuls des objets de description sont lus."""
+
+    def test_l_entree_decrit_le_serveur_sans_navigateur(self):
+        import _autostart
+        entree = _autostart.entree()
+        self.assertEqual(entree.nom, "gpxsolar")
+        self.assertEqual(entree.commande[-2:], ("--serve-gui", "--no-browser"))
+        self.assertEqual(_autostart.LINUX_SERVICE_NAME, "gpxsolar.service")
+        self.assertEqual(entree.label_macos, "com.nico.gpxsolar")
+
+    def test_fige_le_programme_en_cours_est_celui_a_relancer(self):
+        import _autostart
+        from unittest import mock
+        programme = ROOT / "gpxsolar-programme"
+        with mock.patch.object(_autostart.sys, "frozen", True, create=True), \
+                mock.patch.object(_autostart.sys, "executable", str(programme)):
+            self.assertEqual(_autostart.commande(), [str(programme), "--serve-gui", "--no-browser"])
+            self.assertEqual(_autostart.dossier_lancement(), programme.parent)
+
+    def test_les_routes_du_commun_sont_branchees_sur_cette_entree(self):
+        self.assertIn("demarrage.routes(_autostart.entree", SOURCE)
+        self.assertIn("unite_systemd=_autostart.LINUX_SERVICE_NAME", SOURCE)
+
+    def test_la_page_n_a_pas_de_case_propre(self):
+        for nom in ("index.html", "app.js", "web_bridge.js"):
+            texte = (ROOT / "gui" / nom).read_text(encoding="utf-8")
+            self.assertNotIn("autostart", texte, nom)
+
+
 if __name__ == "__main__":
     unittest.main()
