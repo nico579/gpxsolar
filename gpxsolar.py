@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.12.0"
+VERSION      = "1.13.0"
 VERSION_DATE = "2026-09"
 
 
@@ -5171,10 +5171,6 @@ def main_serve_gui(args, options):
             ok = clear_history()
             return {"ok": ok}
 
-        def set_lang(self, code):
-            """Persiste l'override manuel de langue de l'UI (toggle FR/EN)."""
-            return {"ok": save_lang(code)}
-
         def poll_log(self):
             items = []
             try:
@@ -5424,9 +5420,6 @@ def main_serve_gui(args, options):
         api.stop()
         return {"ok": True}
 
-    def _set_lang(payload):
-        return api.set_lang((payload or {}).get("code"))
-
     # Port réel connu seulement après le démarrage du serveur (plus bas) :
     # la route le lit au moment de l'appel.
     etat_serveur = {"port": None, "sans_icone": False}
@@ -5456,6 +5449,10 @@ def main_serve_gui(args, options):
     import _autostart
     from nico579_commons import demarrage
     routes_demarrage_get, routes_demarrage_post = demarrage.routes(_autostart.entree, _langue_console)
+    # Le choix FR / EN est celui du commun (/nico579-langue.js) ; la console et l'icône le
+    # relisent par _langue_console.
+    from nico579_commons import langue
+    routes_langue_get, routes_langue_post = langue.routes(load_lang, save_lang)
 
     api_routes = {
         "init": _init_data,
@@ -5465,15 +5462,16 @@ def main_serve_gui(args, options):
         "browse-dir": _api_browse_dir,
         **routes_maj_get,
         **routes_demarrage_get,
+        **routes_langue_get,
     }
     post_routes = {
         "launch": _launch,
         "stop": _stop,
         "clear-historique": lambda _payload: api.clear_historique(),
-        "set-lang": _set_lang,
         "new-instance": _new_instance,
         **routes_maj_post,
         **routes_demarrage_post,
+        **routes_langue_post,
     }
 
     # Un gpxsolar tourne peut-être déjà sur le port de départ : un second

@@ -375,6 +375,17 @@ class CaseDemarrageAutomatique(unittest.TestCase):
             texte = (ROOT / "gui" / nom).read_text(encoding="utf-8")
             self.assertNotIn("autostart", texte, nom)
 
+    def test_le_selecteur_de_langue_est_celui_du_commun(self):
+        html = (ROOT / "gui" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("data-nico579-langue", html)
+        self.assertLess(html.index("/app.js"), html.index("/nico579-langue.js"))
+        for nom in ("index.html", "app.js", "web_bridge.js"):
+            texte = (ROOT / "gui" / nom).read_text(encoding="utf-8")
+            self.assertNotIn("set_lang", texte, nom)
+            self.assertNotIn("data-lang-btn", texte, nom)
+        self.assertIn("langue.routes(load_lang, save_lang)", SOURCE)
+        self.assertNotIn("set-lang", SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()
