@@ -18,11 +18,9 @@
   <button class="btn-toggle" id="btn-log"  onclick="toggleLogPanel()">📋 Logs</button>
   <span id="footer-status" style="font-size:11px;color:var(--dim);margin-left:8px"></span>
   <span id="nico579-reglages" data-classe="btn-toggle" style="margin-left:auto;margin-right:8px"></span>
-  <span style="display:flex;border:1px solid var(--bd);border-radius:4px;overflow:hidden"
-        title="Langue / Language">
-   <button class="btn-lang" data-lang-btn="fr" onclick="setLang('fr', true)">FR</button>
-   <button class="btn-lang" data-lang-btn="en" onclick="setLang('en', true)">EN</button>
-  </span>
+  <span data-nico579-langue data-classe="btn-lang"
+        style="display:flex;border:1px solid var(--bd);border-radius:4px;overflow:hidden"
+        title="Langue / Language"></span>
 </div>
 
 <div id="form-inner">
@@ -256,5 +254,6 @@
 <script src="/app.js"></script>
 <script src="/nico579-maj.js"></script>
 <script src="/nico579-reglages.js"></script>
+<script src="/nico579-langue.js"></script>
 </body>
 </html>

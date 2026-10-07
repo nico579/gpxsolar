@@ -24,6 +24,5 @@ window.api = {
   launch: (cfg) => _post('/api/launch', cfg),
   stop: () => _post('/api/stop'),
   clear_historique: () => _post('/api/clear-historique'),
-  set_lang: (code) => _post('/api/set-lang', { code }),
   new_instance: () => _post('/api/new-instance'),
 };

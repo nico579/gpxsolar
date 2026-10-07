@@ -115,16 +115,14 @@ function applyI18n(){
     const v = t(el.dataset.i18nTitle); if (v) el.title = v; });
   document.querySelectorAll('[data-i18n-html]').forEach(el => {
     const v = t(el.dataset.i18nHtml); if (v) el.innerHTML = v; });  // contenu statique de confiance
-  document.querySelectorAll('[data-lang-btn]').forEach(b =>
-    b.classList.toggle('active', b.dataset.langBtn === _lang));
 }
-function setLang(code, persist){
+function setLang(code){
   _lang = (code === 'en') ? 'en' : 'fr';
   applyI18n();
-  if (persist) {
-    api.set_lang(_lang).catch(e => console.error('set_lang error:', e));
-  }
 }
+// Le choix FR / EN est celui du commun (/nico579-langue.js, route /api/langue) : il dessine
+// les boutons, garde le choix et annonce chaque changement ; la page applique ses textes.
+document.addEventListener('nico579-langue', e => setLang(e.detail.code));
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 // Les données initiales viennent du serveur (/api/init), relues à chaque
@@ -134,7 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   installerResize();
   let d = {}, erreur = null;
   try { d = (await api.get_init_data()) || {}; } catch(e) { erreur = e; }
-  setLang((d.lang === 'fr' || d.lang === 'en') ? d.lang : detectLang(), false);
+  setLang((d.lang === 'fr' || d.lang === 'en') ? d.lang : detectLang());
   try {
     if (erreur) throw erreur;
     initFromData(d);
