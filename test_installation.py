@@ -15,11 +15,11 @@ Exécution :
 import os
 import re
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import _amorcage
 import _installation
 
 RACINE = Path(__file__).resolve().parent
@@ -243,7 +243,8 @@ class EnvironnementSysteme(unittest.TestCase):
     def test_appelee_avant_tout_lancement_de_processus(self):
         source = (RACINE / "gpxsolar.py").read_text(encoding="utf-8")
         appel = source.index("environnement.retablir_environnement_systeme()")
-        self.assertLess(appel, source.index("subprocess.run("))
+        # Le premier processus que lance le programme est celui de l'amorçage (venv, pip).
+        self.assertLess(appel, source.index("_amorcage.Amorcage("))
 
     def test_seulement_dans_l_executable_ou_la_bibliotheque_est_embarquee(self):
         # Depuis les sources, la bibliothèque peut ne pas être installée avant
@@ -260,7 +261,9 @@ class EnvironnementSysteme(unittest.TestCase):
 class Dependances(unittest.TestCase):
     """Dépendances déclarées une fois (requirements.in), verrouillées pour
     les trois systèmes (requirements.txt), plus PyInstaller pour construire
-    (requirements-build.txt). Jumelle de VerrouTests de lidar2map."""
+    (requirements-build.txt). Jumelle de VerrouTests de lidar2map ; la lecture
+    du verrou elle-même (absents, commande, empreinte) est testée dans
+    nico579-commons (tests/test_amorcage.py)."""
 
     @staticmethod
     def _pins(fichier):
@@ -269,12 +272,12 @@ class Dependances(unittest.TestCase):
             if ligne[:1].isalnum() and "==" in ligne:
                 nom, reste = ligne.split("==", 1)
                 version, _, marqueur = reste.partition(";")
-                pins[(_installation.nom_normalise(nom),
+                pins[(_amorcage.nom_normalise(nom),
                       marqueur.replace("\\", "").strip())] = version.strip()
         return pins
 
     def test_dependances_directes_sans_versions_ni_marqueurs(self):
-        noms = _installation.dependances_directes(conditionnelles=True)
+        noms = _amorcage.dependances_directes(RACINE / "requirements.in", conditionnelles=True)
         for attendu in ("pytz", "srtm.py", "pysolar", "pandas", "rasterio", "pystray",
                         "nico579-commons", "numba", "py7zr"):
             self.assertIn(attendu, noms)
@@ -284,7 +287,7 @@ class Dependances(unittest.TestCase):
     def test_les_conditionnelles_ne_sont_pas_exigees_au_demarrage(self):
         # numba n'a pas de roue pour les Mac Intel : absent à bon droit de ce
         # système, le contrôle au démarrage ne l'exige pas.
-        requises = _installation.dependances_directes()
+        requises = _amorcage.dependances_directes(RACINE / "requirements.in")
         self.assertIn("rasterio", requises)
         self.assertNotIn("numba", requises)
         with tempfile.TemporaryDirectory() as dossier:
@@ -292,18 +295,19 @@ class Dependances(unittest.TestCase):
             fichier.write_text("# commentaire\n-c contraintes.txt\nPillow>=10  # image\n"
                                "numba ; sys_platform != 'darwin'\nlaspy[lazrs]\n",
                                encoding="utf-8")
-            self.assertEqual(_installation.dependances_directes(fichier),
+            self.assertEqual(_amorcage.dependances_directes(fichier),
                              ["Pillow", "laspy"])
             self.assertEqual(
-                _installation.dependances_directes(fichier, conditionnelles=True),
+                _amorcage.dependances_directes(fichier, conditionnelles=True),
                 ["Pillow", "numba", "laspy"])
 
     def test_chaque_dependance_directe_est_dans_les_deux_verrous(self):
         for fichier in ("requirements.txt", "requirements-build.txt"):
             verrouilles = {nom for nom, _ in self._pins(fichier)}
             with self.subTest(verrou=fichier):
-                for nom in _installation.dependances_directes(conditionnelles=True):
-                    self.assertIn(_installation.nom_normalise(nom), verrouilles)
+                for nom in _amorcage.dependances_directes(RACINE / "requirements.in",
+                                                          conditionnelles=True):
+                    self.assertIn(_amorcage.nom_normalise(nom), verrouilles)
 
     def test_le_verrou_de_construction_ajoute_pyinstaller_aux_memes_versions(self):
         execution = self._pins("requirements.txt")
@@ -323,29 +327,6 @@ class Dependances(unittest.TestCase):
             for entree in entrees:
                 with self.subTest(verrou=fichier, paquet=entree.split("==", 1)[0]):
                     self.assertIn("--hash=sha256:", entree)
-
-    def test_absents_trouves_par_les_metadonnees_sous_leurs_noms_normalises(self):
-        installees = [types.SimpleNamespace(metadata={"Name": n})
-                      for n in ("pillow", "srtm_py", "Rasterio")]
-        self.assertEqual(
-            _installation.dependances_absentes(
-                ["Pillow", "srtm.py", "rasterio", "numba"], distributions=installees),
-            ["numba"])
-
-    def test_commande_d_installation_verifie_les_empreintes_du_verrou(self):
-        self.assertEqual(
-            _installation.commande_installation("python", "--user"),
-            ["python", "-m", "pip", "install", "-q", "--disable-pip-version-check",
-             "--require-hashes", "-r", str(_installation.VERROU), "--user"])
-
-    def test_empreinte_du_verrou_change_avec_son_contenu(self):
-        with tempfile.TemporaryDirectory() as dossier:
-            verrou = Path(dossier) / "requirements.txt"
-            verrou.write_text("a==1 \\\n    --hash=sha256:00\n", encoding="utf-8")
-            avant = _installation.empreinte_verrou(verrou)
-            verrou.write_text("a==2 \\\n    --hash=sha256:00\n", encoding="utf-8")
-            self.assertNotEqual(_installation.empreinte_verrou(verrou), avant)
-            self.assertEqual(len(avant), 64)
 
 
 if __name__ == "__main__":

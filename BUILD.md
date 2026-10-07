@@ -92,7 +92,7 @@ Le onedir est buildé en **2 passes Analysis** :
 | `requirements.in` | Les dépendances, déclarées une seule fois (les noms, sans versions) |
 | `requirements.txt` | Le verrou : version exacte et empreinte SHA-256 de chaque paquet, pour les trois systèmes à la fois, généré par uv (voir § 8) |
 | `requirements-build.in`, `requirements-build.txt` | Le même verrou plus PyInstaller, pour construire le binaire |
-| `test_bootstrap.py` | Épreuve de l'installation des dépendances (venv, pip, none, `--installer-deps`), avec pip, venv et relance simulés |
+| `test_amorcage_commun.py` | `_amorcage.py` (copie de `nico579_commons.amorcage`, testé dans le commun) n'a pas dérivé du paquet installé, et gpxsolar l'appelle comme il faut |
 | `gpxsolar_win.spec` | Spec onedir **Windows ET Linux** (ELF) |
 | `gpxsolar_win_build.ps1` | Build Windows (une passe PyInstaller) |
 | `setup_build_windows.ps1` | Prépare la machine Windows |

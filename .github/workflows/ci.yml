@@ -8,7 +8,7 @@ on:
       - 'test_dossiers.py'
       - 'test_installation.py'
       - 'test_serve_web.py'
-      - 'test_bootstrap.py'
+      - 'test_amorcage_commun.py'
       - 'exe_smoke.py'
       - '_*.py'
       - 'gui/**'
@@ -26,7 +26,7 @@ on:
       - 'test_dossiers.py'
       - 'test_installation.py'
       - 'test_serve_web.py'
-      - 'test_bootstrap.py'
+      - 'test_amorcage_commun.py'
       - 'exe_smoke.py'
       - '_*.py'
       - 'gui/**'
@@ -133,12 +133,11 @@ jobs:
         # tourne le programme, et --desinstaller ne supprime jamais celui-ci.
         run: python test_installation.py
 
-      - name: Bootstrap des dependances (test_bootstrap.py)
-        # Le verrou installe dans un venv (auto, force), dans
-        # l'environnement courant (pip), verifie seulement (none), et par
-        # --installer-deps. pip, venv et relance simules : jamais de vrai
-        # venv sur le runner.
-        run: python test_bootstrap.py
+      - name: Amorcage des dependances (test_amorcage_commun.py)
+        # Le moteur est _amorcage.py, copie octet pour octet de
+        # nico579_commons.amorcage (teste dans nico579-commons) : ici, que la
+        # copie n'a pas derive du paquet installe et que gpxsolar l'appelle bien.
+        run: python test_amorcage_commun.py
 
       - name: Dossiers d'état et de sorties (test_dossiers.py)
         # Reprise unique de l'état d'une version <= 1.3, chemins de la ligne
