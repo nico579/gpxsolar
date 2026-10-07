@@ -54,6 +54,9 @@ hiddenimports += ["pyproj._compat", "pyproj.crs._cf1x8", "pyproj.transformer"]
 
 # ── rasterio ──────────────────────────────────────────────────────────────────
 datas         += collect_data_files("rasterio")
+# Les fichiers JavaScript du paquet commun (bandeau de mise à jour, bouton Réglages) :
+# PyInstaller n'embarque pas les données d'un paquet sans qu'on le lui demande.
+datas         += collect_data_files("nico579_commons")
 binaries      += collect_dynamic_libs("rasterio")
 hiddenimports += collect_submodules("rasterio")
 hiddenimports += [

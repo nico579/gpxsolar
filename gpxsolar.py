@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.10.0"
+VERSION      = "1.11.0"
 VERSION_DATE = "2026-09"
 
 
@@ -4837,6 +4837,12 @@ def _auto_test_version(argv) -> int:
     try:
         from nico579_commons import maj_install, serveweb  # noqa: F401
         _resoudre_gui_dir()
+        # Les fichiers JavaScript communs (bandeau de mise à jour, bouton Réglages)
+        # doivent être dans le bundle : sans eux la page en réclame un qui n'existe pas.
+        manquants = serveweb.fichiers_manquants()
+        if manquants:
+            print(f"auto-test : fichiers communs absents du bundle : {', '.join(manquants)}")
+            return 1
     except Exception as exc:
         print(f"auto-test : {type(exc).__name__}: {exc}")
         return 1
