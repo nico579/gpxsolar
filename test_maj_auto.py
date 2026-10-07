@@ -60,6 +60,14 @@ class AutoTest(unittest.TestCase):
         self.assertEqual(sortie.exception.code, 0)
 
 
+class VerificationDeVersion(unittest.TestCase):
+    def test_la_derniere_reponse_est_gardee_dans_le_dossier_d_etat(self):
+        # Un redémarrage ne repose pas la question à GitHub tant qu'elle a moins d'une heure.
+        verificateur = gpxsolar._verificateur_de_version()
+        self.assertEqual(verificateur._cache, gpxsolar._dossiers.DOSSIERS.dossier_etat() / "maj.json")
+        self.assertEqual(verificateur.fraicheur_s, 3600)
+
+
 class Description(unittest.TestCase):
     def test_application_sans_donnee_a_recopier_et_memes_arguments(self):
         with mock.patch.object(sys, "argv", ["gpxsolar", "--port", "9000"]):
