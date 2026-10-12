@@ -268,12 +268,20 @@ pytest test_gpxsolar.py     # équivalent via pytest
 python test_dossiers.py     # dossiers d'état et de sorties (unittest)
 python test_installation.py # ménage de l'ancien lanceur, désinstallation
 python test_serve_web.py    # interface web : serveur, instances, pont JS
+python test_page_navigateur.py  # la page dans un vrai navigateur (Playwright)
 ```
 
 `test_serve_web.py` éprouve l'interface web sur un vrai port de la boucle
 locale : pages et routes servies, refus des provenances étrangères, instance
 déjà ouverte, nouvelle instance, parcours des fichiers, et accord entre la
 page, le pont `gui/web_bridge.js` et les routes du serveur.
+
+`test_page_navigateur.py` lance gpxsolar depuis les sources (sans navigateur
+ni icône, dossier d'état jetable) et fait charger sa page par un vrai Chromium,
+piloté par Playwright : aucune erreur JavaScript ni réponse en échec, bascule
+FR / EN, panneau Réglages commun, aide, historique et parcours des fichiers.
+Sans Playwright (`pip install playwright` puis
+`python -m playwright install chromium`), il est sauté ; la CI l'installe.
 
 `test_dossiers.py` éprouve `_dossiers.py` et son branchement dans
 `gpxsolar.py` : reprise unique de l'état d'une 1.3, chemins de la ligne de
