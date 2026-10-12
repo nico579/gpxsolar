@@ -8,6 +8,7 @@ on:
       - 'test_dossiers.py'
       - 'test_installation.py'
       - 'test_serve_web.py'
+      - 'test_page_navigateur.py'
       - 'test_amorcage_commun.py'
       - 'exe_smoke.py'
       - '_*.py'
@@ -26,6 +27,7 @@ on:
       - 'test_dossiers.py'
       - 'test_installation.py'
       - 'test_serve_web.py'
+      - 'test_page_navigateur.py'
       - 'test_amorcage_commun.py'
       - 'exe_smoke.py'
       - '_*.py'
@@ -151,6 +153,33 @@ jobs:
         # instance, parcours des fichiers, et accord entre la page, le pont
         # web_bridge.js et les routes du serveur.
         run: python test_serve_web.py
+
+  # La page elle-même, dans un vrai Chromium piloté par Playwright : gpxsolar
+  # lancé depuis les sources, sans navigateur ni icône, et ses gestes réels
+  # (langue, panneau Réglages commun, aide, historique, parcours des fichiers).
+  # Un seul système suffit : la page est la même partout.
+  navigateur:
+    name: Page dans un vrai navigateur
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Dépendances, Playwright et Chromium
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install playwright==1.63.0
+          python -m playwright install --with-deps chromium
+
+      - name: Page (test_page_navigateur.py)
+        run: python test_page_navigateur.py -v
 
   # Chaque système de construction de release.yml (windows-latest,
   # ubuntu-latest, macos-latest, macos-15-intel) doit pouvoir installer les
