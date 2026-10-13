@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.13.1"
+VERSION      = "1.14.0"
 VERSION_DATE = "2026-09"
 
 
@@ -5442,6 +5442,10 @@ def main_serve_gui(args, options):
             etat_icone["tray"].arret.set()
 
     installateur = _installateur(verificateur, _quitter_pour_la_mise_a_jour)
+
+    # Restes d'une mise à jour ancienne (assistant tué, coupure) à côté de l'installation :
+    # effacés en tâche de fond, sans retarder le démarrage (nico579_commons 0.5.0).
+    threading.Thread(target=installateur.nettoyer_restes, name="menage-maj", daemon=True).start()
     from nico579_commons import maj_install
     routes_maj_get, routes_maj_post = maj_install.routes(installateur, _langue_console)
     # La case « Démarrer automatiquement avec le système » est celle du commun
