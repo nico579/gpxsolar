@@ -133,11 +133,12 @@ class PageGpxsolar(unittest.TestCase):
         expect(panneau).to_be_hidden()
 
     def test_aide_et_historique(self):
-        self.page.get_by_role("button", name="? Aide").click()
-        aide = self.page.locator("#help-modal")
-        expect(aide).to_be_visible()
-        aide.get_by_role("button", name="Fermer").click()
-        expect(aide).to_be_hidden()
+        # L'aide est le README de la version installée, dans la langue de la
+        # page, ouvert dans un nouvel onglet : pas de fenêtre d'aide à part.
+        aide = self.page.locator("#aide")
+        expect(aide).to_have_attribute("target", "_blank")
+        expect(aide).to_have_attribute(
+            "href", re.compile(rf"/nico579/gpxsolar/blob/v{re.escape(VERSION)}/README(\.fr)?\.md$"))
         self.page.locator("#btn-hist").click()
         expect(self.page.locator("#panneau-hist")).to_be_visible()
         self.page.locator("#btn-hist").click()

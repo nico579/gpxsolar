@@ -8,7 +8,7 @@ let _initialized = false;
 // Variantes : data-i18n (textContent), -placeholder, -title, -html (innerHTML).
 const I18N = {
   fr: {
-    "btn.run":"▶ Lancer le calcul", "btn.stop":"■ Arrêter", "btn.help":"? Aide", "btn.hist":"⏱ Historique",
+    "btn.run":"▶ Lancer le calcul", "btn.stop":"■ Arrêter", "btn.hist":"⏱ Historique",
     "sec.file":"Fichier GPX & date", "sec.dem":"Modèle de données d'altitude (DEM)",
     "sec.params":"Options de simulation", "sec.out":"Sorties & visualisations", "sec.legend":"Légendes",
     "sec.modes":"Modes",
@@ -33,8 +33,7 @@ const I18N = {
     "leg.tyellow":"Jaune — Tuile sur disque (pas en RAM)",
     "hist.title":"⏱ Historique des calculs", "clear":"🗑 Vider",
     "log.ready":"Prêt", "log.copy":"⎘ Copier", "log.hidetip":"Masquer (ré-affichable via le bouton Logs)",
-    "help.title":"Aide — Simu Rando Solaire", "close":"Fermer",
-    "help.body":"Ce script analyse l'ensoleillement d'une trace GPX.\n\n1. Choisissez un fichier GPX.\n2. Sélectionnez une date et une heure de départ.\n3. Choisissez un modèle de données d'altitude:\n   - SRTM/Copernicus: Mondiaux, basse résolution.\n   - IGN ALTI: France, moyenne résolution.\n   - IGN LiDAR HD: France, très haute résolution.\n4. Choisissez les options de simulation (type d'ombre et sens).\n   - En mode LiDAR, les options contrôlent les couches (MNT, MNS, MNH).\n5. Lancez le calcul.\n\nLes résultats sont un fichier KML à ouvrir dans Google Earth et un rapport Excel.",
+    "help.link":"Aide : le mode d'emploi (README)", "close":"Fermer",
     // Dynamiques (JS) — {x} = placeholders pour tf()
     "initerr":"Erreur init : ", "log.init1":"Interface graphique initialisée.\n", "log.init2":"Prêt à lancer une simulation.\n",
     "hist.empty":"Aucun calcul enregistré.", "hist.recalled":"Paramètres rappelés depuis l'historique ({date})",
@@ -56,7 +55,7 @@ const I18N = {
     "newinst.starting":"Démarrage d'une nouvelle instance gpxsolar…", "apiunavail":"API non disponible",
   },
   en: {
-    "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.help":"? Help", "btn.hist":"⏱ History",
+    "btn.run":"▶ Run", "btn.stop":"■ Stop", "btn.hist":"⏱ History",
     "sec.file":"GPX file & date", "sec.dem":"Elevation model (DEM)",
     "sec.params":"Simulation options", "sec.out":"Outputs & visualisations", "sec.legend":"Legends",
     "sec.modes":"Modes",
@@ -80,8 +79,7 @@ const I18N = {
     "leg.tyellow":"Yellow — Tile on disk (not in RAM)",
     "hist.title":"⏱ Calculation history", "clear":"🗑 Clear",
     "log.ready":"Ready", "log.copy":"⎘ Copy", "log.hidetip":"Hide (re-show via the Logs button)",
-    "help.title":"Help — Simu Rando Solaire", "close":"Close",
-    "help.body":"This tool analyses the sunlight along a GPX track.\n\n1. Choose a GPX file.\n2. Select a start date and time.\n3. Choose an elevation data model:\n   - SRTM/Copernicus: global, low resolution.\n   - IGN ALTI: France, medium resolution.\n   - IGN LiDAR HD: France, very high resolution.\n4. Choose the simulation options (shadow type and direction).\n   - In LiDAR mode, the options control the layers (DTM, DSM, CHM).\n5. Run the calculation.\n\nThe results are a KML file to open in Google Earth and an Excel report.",
+    "help.link":"Help: the user guide (README)", "close":"Close",
     "initerr":"Init error: ", "log.init1":"GUI initialised.\n", "log.init2":"Ready to run a simulation.\n",
     "hist.empty":"No saved run.", "hist.recalled":"Parameters recalled from history ({date})",
     "hist.alreadyempty":"History is already empty.", "hist.confirm":"Delete {n} history entry(ies)?",
@@ -119,6 +117,21 @@ function applyI18n(){
 function setLang(code){
   _lang = (code === 'en') ? 'en' : 'fr';
   applyI18n();
+  lienAide();
+}
+// L'aide est le README de la version installée, dans la langue de la page :
+// celui de main peut avoir pris de l'avance sur le programme (même bouton
+// « ? » que hike2gpx, à côté de FR/EN).
+let _version = null;
+function lienAide(){
+  const a = document.getElementById('aide');
+  if (!a) return;
+  const fichier = _lang === 'en' ? 'README.md' : 'README.fr.md';
+  // La version arrive déjà préfixée (« v1.14.1 ») : le tag ne prend qu'un v.
+  const tag = _version ? 'v' + String(_version).replace(/^v/, '') : 'main';
+  a.href = 'https://github.com/nico579/gpxsolar/blob/' + tag + '/' + fichier;
+  a.title = t('help.link');
+  a.setAttribute('aria-label', t('help.link'));
 }
 // Le choix FR / EN est celui du commun (/nico579-langue.js, route /api/langue) : il dessine
 // les boutons, garde le choix et annonce chaque changement ; la page applique ses textes.
@@ -138,6 +151,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initFromData(d);
     // Le titre de la fenêtre pywebview portait la version : l'onglet aussi.
     if (d.version) document.title = 'Simu Rando Solaire ' + d.version;
+    if (d.version) { _version = d.version; lienAide(); }
   } catch(e) {
     document.getElementById('footer-status').textContent = t('initerr') + e;
     console.error('init error:', e);
@@ -450,14 +464,6 @@ function verifierInstanceDejaOuverte() {
 function fermerInstanceModal() {
   const modal = document.getElementById('instance-modal');
   if (modal) modal.style.display = 'none';
-}
-
-// ── Aide ─────────────────────────────────────────────────────────────────────
-function afficherAide() {
-  document.getElementById('help-modal').classList.add('show');
-}
-function fermerAide() {
-  document.getElementById('help-modal').classList.remove('show');
 }
 
 // ── Panneau Logs (show/hide) ─────────────────────────────────────────────────
