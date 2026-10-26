@@ -13,11 +13,13 @@
 <div id="btn-bar">
   <button class="btn btn-run" id="btn-run" onclick="lancer()" data-i18n="btn.run">▶ Lancer le calcul</button>
   <button class="btn btn-stop" id="btn-stop" onclick="arreter()" disabled data-i18n="btn.stop">■ Arrêter</button>
-  <button class="btn btn-help" onclick="afficherAide()" data-i18n="btn.help">? Aide</button>
   <button class="btn-toggle" id="btn-hist" onclick="toggleHistorique()" data-i18n="btn.hist" style="margin-left:12px">⏱ Historique</button>
   <button class="btn-toggle" id="btn-log"  onclick="toggleLogPanel()">📋 Logs</button>
   <span id="footer-status" style="font-size:11px;color:var(--dim);margin-left:8px"></span>
   <span id="nico579-reglages" data-classe="btn-toggle" style="margin-left:auto;margin-right:8px"></span>
+  <a id="aide" class="btn-toggle" href="https://github.com/nico579/gpxsolar/blob/main/README.fr.md"
+     target="_blank" rel="noopener" title="Aide : le mode d'emploi (README)"
+     aria-label="Aide : le mode d'emploi (README)" style="margin-right:8px;text-decoration:none">?</a>
   <span data-nico579-langue data-classe="btn-lang"
         style="display:flex;border:1px solid var(--bd);border-radius:4px;overflow:hidden"
         title="Langue / Language"></span>
@@ -190,14 +192,6 @@
   <div id="log-content"></div>
 </div>
 
-<!-- Modale d'aide -->
-<div id="help-modal" onclick="if(event.target===this)fermerAide()">
-  <div class="inner">
-    <h3 data-i18n="help.title">Aide — Simu Rando Solaire</h3>
-    <div id="help-body" data-i18n="help.body"></div>
-    <div class="close"><button class="btn btn-sm" onclick="fermerAide()" data-i18n="close">Fermer</button></div>
-  </div>
-</div>
 
 <!-- Parcours des dossiers et fichiers côté serveur (remplace le sélecteur
      natif de pywebview : le navigateur ne peut pas parcourir le disque du
