@@ -127,7 +127,9 @@ function lienAide(){
   const a = document.getElementById('aide');
   if (!a) return;
   const fichier = _lang === 'en' ? 'README.md' : 'README.fr.md';
-  a.href = 'https://github.com/nico579/gpxsolar/blob/' + (_version ? 'v' + _version : 'main') + '/' + fichier;
+  // La version arrive déjà préfixée (« v1.14.1 ») : le tag ne prend qu'un v.
+  const tag = _version ? 'v' + String(_version).replace(/^v/, '') : 'main';
+  a.href = 'https://github.com/nico579/gpxsolar/blob/' + tag + '/' + fichier;
   a.title = t('help.link');
   a.setAttribute('aria-label', t('help.link'));
 }
