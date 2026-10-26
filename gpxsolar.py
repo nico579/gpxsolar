@@ -114,7 +114,7 @@ if (getattr(sys, "frozen", False) and __name__ == "__main__"
 # de la fenêtre GUI et par le tag de release (deploy.py --new-tag la dérive).
 # Le bump se fait ICI, nulle part ailleurs : avant, la chaîne argparse et
 # APP_VERSION étaient deux littéraux libres de diverger.
-VERSION      = "1.14.1"
+VERSION      = "1.14.2"
 VERSION_DATE = "2026-09"
 
 
